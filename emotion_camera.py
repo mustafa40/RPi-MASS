@@ -256,7 +256,7 @@ def main():
 
     last_sent_state = ""
     last_command_time = 0.0
-        frame_count = 0
+    frame_count = 0
     last_faces = []
     try:
         
