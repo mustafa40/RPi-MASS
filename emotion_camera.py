@@ -4,32 +4,29 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-try:
-    from arduino_controller import ArduinoController
-except ImportError:
-    ArduinoController = None
+from arduino_controller import ArduinoController
 
 
-# ---------------------------------------------------------
-# AYARLAR
-# ---------------------------------------------------------
+# =========================================================
+# DOSYA VE KAMERA AYARLARI
+# =========================================================
 
 BASE_DIR = Path(__file__).resolve().parent
+
 MODEL_PATH = BASE_DIR / "emotion-ferplus-8.onnx"
+
+FACE_CASCADE_PATH = (
+    "/usr/share/opencv4/haarcascades/"
+    "haarcascade_frontalface_default.xml"
+)
 
 CAMERA_INDEX = 0
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
-# Duygunun Arduino'ya gönderilmeden önce kaç kare
-# art arda görülmesi gerektiği
-REQUIRED_STABLE_FRAMES = 8
-
-# Arduino'ya iki komut arasında minimum süre
-COMMAND_DELAY_SECONDS = 3.0
-
-# Çok düşük güven değerlerinde NORMAL kabul edilir
 MIN_CONFIDENCE = 0.25
+STABLE_FRAME_COUNT = 8
+COMMAND_INTERVAL = 3.0
 
 
 # FER+ modelinin çıkış sırası
@@ -45,29 +42,34 @@ EMOTION_LABELS = [
 ]
 
 
-# ---------------------------------------------------------
+# =========================================================
 # YARDIMCI FONKSİYONLAR
-# ---------------------------------------------------------
+# =========================================================
 
 def softmax(values):
-    values = values.astype(np.float32)
+    values = np.asarray(values, dtype=np.float32)
     values = values - np.max(values)
 
     exp_values = np.exp(values)
     total = np.sum(exp_values)
 
-    if total == 0:
+    if total <= 0:
         return np.zeros_like(values)
 
     return exp_values / total
 
 
-def emotion_to_vehicle_state(emotion):
+def emotion_to_state(emotion):
     """
-    Kamera duygusunu Arduino komutuna dönüştürür.
+    FER+ duygu sınıfını araç içi sistem durumuna dönüştürür.
     """
 
-    if emotion in ("ANGRY", "DISGUST", "FEAR", "CONTEMPT"):
+    if emotion in (
+        "ANGRY",
+        "DISGUST",
+        "FEAR",
+        "CONTEMPT",
+    ):
         return "GERGIN"
 
     if emotion == "SAD":
@@ -76,12 +78,33 @@ def emotion_to_vehicle_state(emotion):
     return "NORMAL"
 
 
-def send_arduino_state(arduino, state):
+def connect_arduino():
     """
-    ArduinoController içerisindeki uygun fonksiyonu çağırır.
+    Arduino bağlantısı kurulamazsa kamera sistemi
+    tek başına çalışmaya devam eder.
     """
 
+    try:
+        arduino = ArduinoController()
+        connected = arduino.connect()
+
+        if connected is False:
+            print("Arduino bağlantısı kurulamadı.")
+            print("Sistem yalnızca kamera modunda çalışacak.")
+            return None
+
+        print("Arduino bağlantısı başarılı.")
+        return arduino
+
+    except Exception as error:
+        print(f"Arduino bağlantı hatası: {error}")
+        print("Sistem yalnızca kamera modunda çalışacak.")
+        return None
+
+
+def send_state_to_arduino(arduino, state):
     if arduino is None:
+        print(f"Arduino bağlı değil. Algılanan durum: {state}")
         return
 
     try:
@@ -103,213 +126,214 @@ def send_arduino_state(arduino, state):
         print(f"Arduino komutu gönderilemedi: {error}")
 
 
-def open_arduino():
-    """
-    Arduino bağlı değilse programın kamera kısmı yine çalışır.
-    """
-
-    if ArduinoController is None:
-        print("ArduinoController bulunamadı.")
-        print("Program yalnızca kamera modunda devam ediyor.")
-        return None
-
-    try:
-        arduino = ArduinoController()
-
-        connected = arduino.connect()
-
-        if connected is False:
-            print("Arduino bağlantısı kurulamadı.")
-            print("Program yalnızca kamera modunda devam ediyor.")
-            return None
-
-        print("Arduino bağlantısı başarılı.")
-        return arduino
-
-    except Exception as error:
-        print(f"Arduino bağlantı hatası: {error}")
-        print("Program yalnızca kamera modunda devam ediyor.")
-        return None
-
-
 def close_arduino(arduino):
     if arduino is None:
         return
 
     try:
-        # ArduinoController içinde close varsa çalıştır
-        close_function = getattr(arduino, "close", None)
+        close_method = getattr(arduino, "close", None)
 
-        if callable(close_function):
-            close_function()
+        if callable(close_method):
+            close_method()
 
     except Exception as error:
         print(f"Arduino kapatma hatası: {error}")
 
 
-# ---------------------------------------------------------
-# ANA PROGRAM
-# ---------------------------------------------------------
-
-def main():
-    print("RPi-MASS duygu algılama sistemi başlatılıyor...")
-
+def load_emotion_model():
     if not MODEL_PATH.exists():
         print("HATA: ONNX modeli bulunamadı.")
         print(f"Aranan dosya: {MODEL_PATH}")
-        return
+        return None
 
-    # ONNX modelini yükle
     try:
-        emotion_net = cv2.dnn.readNetFromONNX(str(MODEL_PATH))
+        model = cv2.dnn.readNetFromONNX(str(MODEL_PATH))
         print("Duygu modeli başarıyla yüklendi.")
+        return model
 
     except cv2.error as error:
-        print("Duygu modeli yüklenemedi:")
+        print("HATA: Duygu modeli yüklenemedi.")
         print(error)
-        return
+        return None
 
-    # OpenCV içerisindeki hazır Haar yüz modeli
-    face_cascade_path = (
-        cv2.data.haarcascades
-        + "haarcascade_frontalface_default.xml"
-    )
 
-    face_detector = cv2.CascadeClassifier(face_cascade_path)
+def load_face_detector():
+    cascade_path = Path(FACE_CASCADE_PATH)
 
-    if face_detector.empty():
-        print("HATA: Yüz algılama modeli yüklenemedi.")
-        return
+    if not cascade_path.exists():
+        print("HATA: Haar Cascade dosyası bulunamadı.")
+        print(f"Aranan dosya: {cascade_path}")
+        return None
 
+    detector = cv2.CascadeClassifier(str(cascade_path))
+
+    if detector.empty():
+        print("HATA: Yüz algılama modeli açılamadı.")
+        return None
+
+    print("Yüz algılama modeli başarıyla yüklendi.")
+    return detector
+
+
+def open_camera():
     camera = cv2.VideoCapture(CAMERA_INDEX)
 
     if not camera.isOpened():
         print("HATA: Kamera açılamadı.")
-        return
+        return None
 
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
     camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    arduino = open_arduino()
+    print("Kamera başarıyla açıldı.")
+    return camera
+
+
+def detect_emotion(emotion_model, face_gray):
+    """
+    Yüz görüntüsünü FER+ modeline gönderir.
+    Duygu adı ve güven oranını döndürür.
+    """
+
+    resized_face = cv2.resize(
+        face_gray,
+        (64, 64),
+        interpolation=cv2.INTER_AREA,
+    )
+
+    blob = cv2.dnn.blobFromImage(
+        resized_face,
+        scalefactor=1.0,
+        size=(64, 64),
+        mean=(0,),
+        swapRB=False,
+        crop=False,
+    )
+
+    emotion_model.setInput(blob)
+
+    output = emotion_model.forward()
+    scores = output.flatten()
+
+    probabilities = softmax(scores)
+
+    emotion_index = int(np.argmax(probabilities))
+    confidence = float(probabilities[emotion_index])
+
+    emotion = EMOTION_LABELS[emotion_index]
+
+    return emotion, confidence
+
+
+# =========================================================
+# ANA PROGRAM
+# =========================================================
+
+def main():
+    print("RPi-MASS duygu algılama sistemi başlatılıyor...")
+
+    emotion_model = load_emotion_model()
+
+    if emotion_model is None:
+        return
+
+    face_detector = load_face_detector()
+
+    if face_detector is None:
+        return
+
+    camera = open_camera()
+
+    if camera is None:
+        return
+
+    arduino = connect_arduino()
 
     candidate_state = ""
     candidate_count = 0
 
     last_sent_state = ""
     last_command_time = 0.0
+        try:
 
-    try:
         while True:
+
             success, frame = camera.read()
 
             if not success:
                 print("Kameradan görüntü alınamadı.")
                 break
 
-            # Ayna görüntüsü
             frame = cv2.flip(frame, 1)
 
-            gray_frame = cv2.cvtColor(
+            gray = cv2.cvtColor(
                 frame,
                 cv2.COLOR_BGR2GRAY
             )
 
             faces = face_detector.detectMultiScale(
-                gray_frame,
+                gray,
                 scaleFactor=1.15,
                 minNeighbors=5,
                 minSize=(100, 100)
             )
 
-            displayed_emotion = "YUZ YOK"
-            displayed_state = "BEKLEME"
+            shown_emotion = "YUZ YOK"
+            shown_state = "BEKLEME"
             confidence = 0.0
 
             if len(faces) > 0:
-                # En büyük yüzü seç
-                x, y, width, height = max(
+
+                x, y, w, h = max(
                     faces,
-                    key=lambda face: face[2] * face[3]
+                    key=lambda f: f[2] * f[3]
                 )
 
-                face_gray = gray_frame[
-                    y:y + height,
-                    x:x + width
-                ]
+                face = gray[y:y+h, x:x+w]
 
-                if face_gray.size > 0:
-                    face_gray = cv2.resize(
-                        face_gray,
-                        (64, 64),
-                        interpolation=cv2.INTER_AREA
+                if face.size > 0:
+
+                    emotion, confidence = detect_emotion(
+                        emotion_model,
+                        face
                     )
 
-                    # Model girişi: 1 x 1 x 64 x 64
-                    blob = cv2.dnn.blobFromImage(
-                        face_gray,
-                        scalefactor=1.0,
-                        size=(64, 64),
-                        mean=(0,),
-                        swapRB=False,
-                        crop=False
-                    )
-
-                    emotion_net.setInput(blob)
-
-                    output = emotion_net.forward()
-                    scores = output.flatten()
-
-                    probabilities = softmax(scores)
-
-                    emotion_index = int(
-                        np.argmax(probabilities)
-                    )
-
-                    confidence = float(
-                        probabilities[emotion_index]
-                    )
-
-                    displayed_emotion = EMOTION_LABELS[
-                        emotion_index
-                    ]
+                    shown_emotion = emotion
 
                     if confidence < MIN_CONFIDENCE:
-                        displayed_state = "NORMAL"
+                        state = "NORMAL"
                     else:
-                        displayed_state = emotion_to_vehicle_state(
-                            displayed_emotion
-                        )
+                        state = emotion_to_state(emotion)
 
-                    # Aynı durum art arda görülüyor mu?
-                    if displayed_state == candidate_state:
+                    shown_state = state
+
+                    if state == candidate_state:
                         candidate_count += 1
                     else:
-                        candidate_state = displayed_state
+                        candidate_state = state
                         candidate_count = 1
 
-                    current_time = time.time()
+                    now = time.time()
 
-                    # Kararlı hale geldiyse Arduino'ya gönder
                     if (
-                        candidate_count >= REQUIRED_STABLE_FRAMES
-                        and candidate_state != last_sent_state
-                        and current_time - last_command_time
-                        >= COMMAND_DELAY_SECONDS
+                        candidate_count >= STABLE_FRAME_COUNT
+                        and state != last_sent_state
+                        and now - last_command_time > COMMAND_INTERVAL
                     ):
-                        send_arduino_state(
+
+                        send_state_to_arduino(
                             arduino,
-                            candidate_state
+                            state
                         )
 
-                        last_sent_state = candidate_state
-                        last_command_time = current_time
+                        last_sent_state = state
+                        last_command_time = now
 
-                    # Yüz çerçevesi
                     cv2.rectangle(
                         frame,
                         (x, y),
-                        (x + width, y + height),
+                        (x + w, y + h),
                         (255, 255, 255),
                         2
                     )
@@ -318,62 +342,59 @@ def main():
                 candidate_state = ""
                 candidate_count = 0
 
-            # Ekran bilgileri
             cv2.putText(
                 frame,
-                f"Duygu: {displayed_emotion}",
+                f"Duygu : {shown_emotion}",
                 (20, 35),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.75,
-                (255, 255, 255),
+                (255,255,255),
                 2
             )
 
             cv2.putText(
                 frame,
-                f"Durum: {displayed_state}",
-                (20, 70),
+                f"Durum : {shown_state}",
+                (20,70),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.75,
-                (255, 255, 255),
+                (255,255,255),
                 2
             )
 
             cv2.putText(
                 frame,
-                f"Guven: %{confidence * 100:.0f}",
-                (20, 105),
+                f"Guven : %{confidence*100:.0f}",
+                (20,105),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.70,
-                (255, 255, 255),
+                (255,255,255),
                 2
             )
 
-            cv2.putText(
-                frame,
-                "Cikis: Q",
-                (20, frame.shape[0] - 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.60,
-                (255, 255, 255),
-                2
+            cv2.imshow(
+                "RPi-MASS Emotion Detection",
+                frame
             )
 
-            cv2.imshow("RPi-MASS Emotion Detection", frame)
+            key = cv2.waitKey(1) & 0xFF
 
-            pressed_key = cv2.waitKey(1) & 0xFF
-
-            if pressed_key == ord("q"):
+            if key == ord("q"):
                 break
 
     except KeyboardInterrupt:
-        print("\nProgram kullanıcı tarafından durduruldu.")
+        print("Program durduruldu.")
 
     finally:
+
         close_arduino(arduino)
-        camera.release()
+
+        if camera is not None:
+            camera.release()
+
         cv2.destroyAllWindows()
-        print("Program kapatıldı.")
+
+        print("Program sonlandi.")
 
 
 if __name__ == "__main__":
