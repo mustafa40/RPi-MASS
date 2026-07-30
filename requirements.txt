@@ -1,3 +1,2 @@
 pyserial
 opencv-python
-mediapipe
