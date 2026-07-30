@@ -256,11 +256,14 @@ def main():
 
     last_sent_state = ""
     last_command_time = 0.0
+        frame_count = 0
+    last_faces = []
     try:
         
         while True:
 
             success, frame = camera.read()
+                        frame_count += 1
 
             if not success:
                 print("Kameradan görüntü alınamadı.")
@@ -273,12 +276,28 @@ def main():
                 cv2.COLOR_BGR2GRAY
             )
 
-            faces = face_detector.detectMultiScale(
-                gray,
-                scaleFactor=1.15,
-                minNeighbors=5,
-                minSize=(70, 70)
-            )
+            if frame_count % PROCESS_EVERY_N_FRAMES == 0:
+
+                small = cv2.resize(
+                    gray,
+                    None,
+                    fx=0.5,
+                    fy=0.5
+                )
+
+                detected = face_detector.detectMultiScale(
+                    small,
+                    scaleFactor=1.2,
+                    minNeighbors=4,
+                    minSize=(40,40)
+                )
+
+                last_faces = [
+                    (x*2, y*2, w*2, h*2)
+                    for (x,y,w,h) in detected
+                ]
+
+            faces = last_faces
 
             shown_emotion = "YUZ YOK"
             shown_state = "BEKLEME"
