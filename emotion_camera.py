@@ -21,12 +21,12 @@ FACE_CASCADE_PATH = (
 )
 
 CAMERA_INDEX = 0
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
+CAMERA_WIDTH = 320
+CAMERA_HEIGHT = 240
 
 MIN_CONFIDENCE = 0.25
-STABLE_FRAME_COUNT = 8
-COMMAND_INTERVAL = 3.0
+STABLE_FRAME_COUNT = 3
+COMMAND_INTERVAL = 1.0
 
 
 # FER+ modelinin çıkış sırası
@@ -276,7 +276,7 @@ def main():
                 gray,
                 scaleFactor=1.15,
                 minNeighbors=5,
-                minSize=(100, 100)
+                minSize=(70, 70)
             )
 
             shown_emotion = "YUZ YOK"
