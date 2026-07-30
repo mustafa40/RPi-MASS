@@ -255,8 +255,8 @@ def main():
 
     last_sent_state = ""
     last_command_time = 0.0
-        try:
-
+    try:
+        
         while True:
 
             success, frame = camera.read()
