@@ -7,7 +7,7 @@ class ArduinoController:
 
     def __init__(
         self,
-        port: str = "/dev/ttyACM0",
+        port: str = "/dev/ttyUSB0",
         baud_rate: int = 9600
     ) -> None:
         self.port = port
