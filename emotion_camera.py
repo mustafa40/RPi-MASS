@@ -17,7 +17,9 @@ LOGO_PATH = BASE_DIR / "mfi_logo.png"
 CAMERA_INDEX = 0
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
-PROCESS_EVERY_N_FRAMES = 20
+WINDOW_NAME = "RPi-MASS Emotion Detection"
+FULLSCREEN = True
+PROCESS_EVERY_N_FRAMES = 30
 STABLE_FRAME_COUNT = 1
 COMMAND_INTERVAL = 1.0
 MIN_CONFIDENCE = 0.25
@@ -233,6 +235,15 @@ def main():
     if camera is None:
         return
 
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+
+    if FULLSCREEN:
+        cv2.setWindowProperty(
+            WINDOW_NAME,
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN
+    )
+
     arduino = connect_arduino()
 
     frame_count = 0
@@ -244,6 +255,10 @@ def main():
     shown_emotion = "BEKLEME"
     shown_state = "BEKLEME"
     confidence = 0.0
+    shown_command = "HENUZ GONDERILMEDI"
+fps = 0.0
+fps_counter = 0
+fps_start_time = time.time()
 
     try:
         while True:
@@ -253,6 +268,12 @@ def main():
                 break
 
             frame_count += 1
+            fps_elapsed = time.time() - fps_start_time
+
+            if fps_elapsed >= 1.0:
+            fps = fps_counter / fps_elapsed
+            fps_counter = 0
+            fps_start_time = time.time()
             frame = cv2.flip(frame, 1)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -296,6 +317,7 @@ def main():
                             and now - last_command_time >= COMMAND_INTERVAL
                         ):
                             send_state_to_arduino(arduino, state)
+                            shown_command = state
                             last_sent_state = state
                             last_command_time = now
                 else:
@@ -308,11 +330,25 @@ def main():
             for x, y, w, h in last_faces:
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255, 255), 2)
 
-            draw_text(frame, f"Duygu : {shown_emotion}", 15, 35, 0.8)
-            draw_text(frame, f"Durum : {shown_state}", 15, 70, 0.8)
-            draw_text(frame, f"Guven : %{confidence*100:.0f}", 15, 105, 0.8)
+            arduino_status = "BAGLI" if arduino is not None else "BAGLI DEGIL"
 
-            cv2.imshow("RPi-MASS Emotion Detection", frame)
+            draw_text(frame, f"Arduino : {arduino_status}", 15, 35, 0.65)
+            draw_text(frame, f"Duygu   : {shown_emotion}", 15, 67, 0.65)
+            draw_text(frame, f"Durum   : {shown_state}", 15, 99, 0.65)
+            draw_text(frame, f"Komut   : {shown_command}", 15, 131, 0.65)
+            draw_text(frame, f"Guven   : %{confidence * 100:.0f}", 15, 163, 0.65)
+            draw_text(frame, f"FPS     : {fps:.1f}", 15, 195, 0.65)
+
+            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+
+            if FULLSCREEN:
+                cv2.setWindowProperty(
+                    WINDOW_NAME,
+                    cv2.WND_PROP_FULLSCREEN,
+                    cv2.WINDOW_FULLSCREEN
+                )
+
+            cv2.imshow(WINDOW_NAME, frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
