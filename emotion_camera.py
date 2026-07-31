@@ -14,8 +14,8 @@ MODEL_PATH = BASE_DIR / "emotion-ferplus-8.onnx"
 FACE_CASCADE_PATH = Path("/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml")
 
 CAMERA_INDEX = 0
-CAMERA_WIDTH = 320
-CAMERA_HEIGHT = 240
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
 PROCESS_EVERY_N_FRAMES = 20
 STABLE_FRAME_COUNT = 1
 COMMAND_INTERVAL = 1.0
