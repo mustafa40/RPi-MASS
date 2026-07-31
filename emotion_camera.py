@@ -17,7 +17,7 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "emotion-mobilefacenet.onnx"
-LOGO_PATH = BASE_DIR / "mfi_logo.png"
+LOGO_PATH = BASE_DIR / "MFI_LOGO.PNG"
 LOG_PATH = BASE_DIR / "rpi_mass.log"
 
 FACE_CASCADE_PATH = Path(
@@ -94,6 +94,7 @@ def open_fullscreen_window():
         cv2.WND_PROP_FULLSCREEN,
         cv2.WINDOW_FULLSCREEN
     )
+    cv2.waitKey(100)
 
 
 def centered_text(image, text, y, scale, thickness=2):
@@ -114,44 +115,22 @@ def centered_text(image, text, y, scale, thickness=2):
 
 
 def show_splash():
+    """Show only MFI_LOGO.PNG, cropped to fill the entire screen."""
     open_fullscreen_window()
 
-    splash = np.zeros((SCREEN_HEIGHT, SCREEN_WIDTH, 3), dtype=np.uint8)
     logo = cv2.imread(str(LOGO_PATH), cv2.IMREAD_COLOR)
-
-    if logo is not None:
-        logo_h, logo_w = logo.shape[:2]
-        max_w = int(SCREEN_WIDTH * 0.72)
-        max_h = int(SCREEN_HEIGHT * 0.52)
-        scale = min(max_w / logo_w, max_h / logo_h)
-
-        logo = cv2.resize(
-            logo,
-            (max(1, int(logo_w * scale)), max(1, int(logo_h * scale))),
-            interpolation=cv2.INTER_AREA
-        )
-
-        h, w = logo.shape[:2]
-        x = (SCREEN_WIDTH - w) // 2
-        y = max(15, int(SCREEN_HEIGHT * 0.05))
-        splash[y:y + h, x:x + w] = logo
-
-    centered_text(
-        splash,
-        "Connectivity & Smart Devices",
-        int(SCREEN_HEIGHT * 0.78),
-        max(0.55, SCREEN_WIDTH / 1200),
-        2
-    )
-    centered_text(
-        splash,
-        "RPi-MASS",
-        int(SCREEN_HEIGHT * 0.91),
-        max(0.85, SCREEN_WIDTH / 750),
-        3
-    )
+    if logo is None:
+        log(f"Logo could not be loaded: {LOGO_PATH}")
+        splash = np.zeros((SCREEN_HEIGHT, SCREEN_WIDTH, 3), dtype=np.uint8)
+    else:
+        splash = resize_to_fill(logo, SCREEN_WIDTH, SCREEN_HEIGHT)
 
     cv2.imshow(WINDOW_NAME, splash)
+    cv2.setWindowProperty(
+        WINDOW_NAME,
+        cv2.WND_PROP_FULLSCREEN,
+        cv2.WINDOW_FULLSCREEN
+    )
     cv2.waitKey(2200)
 
 
@@ -167,10 +146,10 @@ def draw_panel(frame, arduino_status, emotion, state, command, confidence, fps):
 
     rows = [
         f"Arduino : {arduino_status}",
-        f"Duygu   : {emotion}",
-        f"Durum   : {state}",
-        f"Komut   : {command}",
-        f"Guven   : {confidence_text}",
+        f"Emotion : {emotion}",
+        f"State   : {state}",
+        f"Command : {command}",
+        f"Confidence: {confidence_text}",
         f"FPS     : {fps:.1f}",
     ]
 
@@ -383,9 +362,9 @@ def main():
     last_face = None
     no_face_frames = FACE_HOLD_FRAMES + 1
 
-    shown_emotion = "BEKLEME"
-    shown_state = "BEKLEME"
-    shown_command = "HENUZ YOK"
+    shown_emotion = "WAITING"
+    shown_state = "WAITING"
+    shown_command = "NONE"
     shown_confidence = None
 
     candidate_state = ""
@@ -442,7 +421,13 @@ def main():
                     shown_emotion = emotion
                     shown_confidence = confidence
                     state = emotion_to_state(emotion)
-                    shown_state = state
+                    state_labels = {
+                        "NORMAL": "NORMAL",
+                        "GERGIN": "TENSE",
+                        "STRESLI": "STRESSED",
+                        "YORGUN": "FATIGUED",
+                    }
+                    shown_state = state_labels.get(state, state)
 
                     if state == candidate_state:
                         candidate_count += 1
@@ -459,7 +444,7 @@ def main():
                         if send_arduino_state(arduino, state):
                             last_sent_state = state
                             last_command_time = now
-                        shown_command = state
+                        shown_command = state_labels.get(state, state)
                 except Exception as error:
                     log(f"Duygu analiz hatasi: {error}")
                 future = None
@@ -486,15 +471,15 @@ def main():
                     2
                 )
             else:
-                shown_emotion = "YUZ YOK"
-                shown_state = "BEKLEME"
+                shown_emotion = "FACE NOT DETECTED"
+                shown_state = "WAITING"
                 shown_confidence = None
                 candidate_state = ""
                 candidate_count = 0
 
             display = resize_to_fill(frame, SCREEN_WIDTH, SCREEN_HEIGHT)
 
-            arduino_status = "BAGLI" if arduino is not None else "BAGLI DEGIL"
+            arduino_status = "CONNECTED" if arduino is not None else "DISCONNECTED"
             draw_panel(
                 display,
                 arduino_status,
@@ -506,6 +491,11 @@ def main():
             )
 
             cv2.imshow(WINDOW_NAME, display)
+            cv2.setWindowProperty(
+                WINDOW_NAME,
+                cv2.WND_PROP_FULLSCREEN,
+                cv2.WINDOW_FULLSCREEN
+            )
             key = cv2.waitKey(1) & 0xFF
 
             if key in (27, ord("q")):
