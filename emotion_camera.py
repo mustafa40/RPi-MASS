@@ -260,20 +260,23 @@ fps = 0.0
 fps_counter = 0
 fps_start_time = time.time()
 
-    try:
-        while True:
-            success, frame = camera.read()
+try:
+    while True:
+        success, frame = camera.read()
             if not success:
                 print("Kameradan goruntu alinamadi.")
                 break
 
             frame_count += 1
+            fps_counter += 1
+
             fps_elapsed = time.time() - fps_start_time
 
             if fps_elapsed >= 1.0:
-            fps = fps_counter / fps_elapsed
-            fps_counter = 0
-            fps_start_time = time.time()
+                fps = fps_counter / fps_elapsed
+                fps_counter = 0
+                fps_start_time = time.time()
+
             frame = cv2.flip(frame, 1)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
