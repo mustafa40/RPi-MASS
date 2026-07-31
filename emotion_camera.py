@@ -26,6 +26,31 @@ EMOTION_LABELS = [
     "ANGRY", "DISGUST", "FEAR", "CONTEMPT",
 ]
 
+def draw_text(img, text, x, y, scale=0.8):
+    (w, h), _ = cv2.getTextSize(
+        text,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        2
+    )
+
+    cv2.rectangle(
+        img,
+        (x - 5, y - h - 8),
+        (x + w + 5, y + 5),
+        (0, 0, 0),
+        -1
+    )
+
+    cv2.putText(
+        img,
+        text,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        (255, 255, 255),
+        2
+    )
 
 def softmax(values):
     values = np.asarray(values, dtype=np.float32)
@@ -235,9 +260,9 @@ def main():
             for x, y, w, h in last_faces:
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255, 255), 2)
 
-            cv2.putText(frame, f"Duygu: {shown_emotion}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
-            cv2.putText(frame, f"Durum: {shown_state}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
-            cv2.putText(frame, f"Guven: %{confidence * 100:.0f}", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+            draw_text(frame, f"Duygu : {shown_emotion}", 15, 35, 0.8)
+            draw_text(frame, f"Durum : {shown_state}", 15, 70, 0.8)
+            draw_text(frame, f"Guven : %{confidence*100:.0f}", 15, 105, 0.8)
 
             cv2.imshow("RPi-MASS Emotion Detection", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
