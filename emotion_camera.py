@@ -12,6 +12,7 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "emotion-ferplus-8.onnx"
 FACE_CASCADE_PATH = Path("/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml")
+LOGO_PATH = BASE_DIR / "mfi_logo.png"
 
 CAMERA_INDEX = 0
 CAMERA_WIDTH = 640
@@ -150,7 +151,53 @@ def open_camera():
     camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     print("Kamera basariyla acildi.")
     return camera
+def show_splash():
+    logo = cv2.imread(str(LOGO_PATH))
 
+    if logo is None:
+        print("Logo bulunamadi.")
+        return
+
+    splash = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    h, w = logo.shape[:2]
+    max_width = 420
+    scale = max_width / w
+
+    logo = cv2.resize(
+        logo,
+        (int(w * scale), int(h * scale))
+    )
+
+    h, w = logo.shape[:2]
+    x = (1280 - w) // 2
+    y = 100
+
+    splash[y:y + h, x:x + w] = logo
+
+    cv2.putText(
+        splash,
+        "Connectivity & Smart Devices",
+        (300, 520),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.2,
+        (255, 255, 255),
+        2
+    )
+
+    cv2.putText(
+        splash,
+        "RPi-MASS",
+        (500, 610),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.7,
+        (0, 255, 255),
+        3
+    )
+
+    cv2.imshow("RPi-MASS", splash)
+    cv2.waitKey(2500)
+    cv2.destroyWindow("RPi-MASS")
 
 def detect_emotion(emotion_model, face_gray):
     resized_face = cv2.resize(face_gray, (64, 64), interpolation=cv2.INTER_AREA)
@@ -169,10 +216,11 @@ def detect_emotion(emotion_model, face_gray):
     confidence = float(probabilities[emotion_index])
     return EMOTION_LABELS[emotion_index], confidence
 
-
 def main():
     print("RPi-MASS duygu algilama sistemi baslatiliyor...")
 
+    show_splash()
+    
     emotion_model = load_emotion_model()
     if emotion_model is None:
         return
