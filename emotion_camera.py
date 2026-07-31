@@ -1,4 +1,8 @@
+#!/usr/bin/env python3
+import os
+import sys
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -11,80 +15,94 @@ except ImportError:
     ArduinoController = None
 
 
-# =========================================================
-# DOSYA YOLLARI
-# =========================================================
-
 BASE_DIR = Path(__file__).resolve().parent
-
-MODEL_PATH = BASE_DIR / "emotion-ferplus-8.onnx"
+MODEL_PATH = BASE_DIR / "emotion-mobilefacenet.onnx"
 LOGO_PATH = BASE_DIR / "mfi_logo.png"
+LOG_PATH = BASE_DIR / "rpi_mass.log"
 
 FACE_CASCADE_PATH = Path(
-    "/usr/share/opencv4/haarcascades/"
-    "haarcascade_frontalface_default.xml"
+    "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
 )
 
-
-# =========================================================
-# KAMERA VE UYGULAMA AYARLARI
-# =========================================================
-
+WINDOW_NAME = "RPi-MASS"
 CAMERA_INDEX = 0
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
-WINDOW_NAME = "RPi-MASS Emotion Detection"
-FULLSCREEN = True
-
-# Yuz arama ve duygu analizi kac karede bir baslatilsin?
-PROCESS_EVERY_N_FRAMES = 15
-
-STABLE_FRAME_COUNT = 1
+FACE_DETECT_EVERY = 4
+EMOTION_EVERY = 8
+FACE_HOLD_FRAMES = 32
+STATE_STABLE_COUNT = 2
 COMMAND_INTERVAL = 1.0
-MIN_CONFIDENCE = 0.25
 
-
-# =========================================================
-# DUYGU ETIKETLERI
-# =========================================================
-
-EMOTION_LABELS = [
-    "NEUTRAL",
-    "HAPPY",
-    "SURPRISE",
-    "SAD",
+EMOTIONS = [
     "ANGRY",
     "DISGUST",
-    "FEAR",
-    "CONTEMPT",
+    "FEARFUL",
+    "HAPPY",
+    "NEUTRAL",
+    "SAD",
+    "SURPRISED",
 ]
 
 
-# =========================================================
-# EKRANA YAZI YAZMA
-# =========================================================
+def log(message):
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    print(line)
+    try:
+        with LOG_PATH.open("a", encoding="utf-8") as file:
+            file.write(line + "\n")
+    except Exception:
+        pass
 
-def draw_text(img, text, x, y, scale=0.62):
-    thickness = 2
 
-    (text_width, text_height), baseline = cv2.getTextSize(
-        text,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        scale,
-        thickness
+def get_screen_size():
+    try:
+        output = os.popen("xrandr --current 2>/dev/null | grep '\\*' | head -1").read()
+        if output.strip():
+            value = output.split()[0]
+            width, height = value.split("x")
+            return int(width), int(height)
+    except Exception:
+        pass
+    return 800, 480
+
+
+SCREEN_WIDTH, SCREEN_HEIGHT = get_screen_size()
+
+
+def resize_to_fill(image, target_width, target_height):
+    h, w = image.shape[:2]
+    scale = max(target_width / w, target_height / h)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    x = max(0, (new_w - target_width) // 2)
+    y = max(0, (new_h - target_height) // 2)
+
+    return resized[y:y + target_height, x:x + target_width]
+
+
+def open_fullscreen_window():
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cv2.moveWindow(WINDOW_NAME, 0, 0)
+    cv2.resizeWindow(WINDOW_NAME, SCREEN_WIDTH, SCREEN_HEIGHT)
+    cv2.setWindowProperty(
+        WINDOW_NAME,
+        cv2.WND_PROP_FULLSCREEN,
+        cv2.WINDOW_FULLSCREEN
     )
 
-    cv2.rectangle(
-        img,
-        (x - 5, y - text_height - 8),
-        (x + text_width + 5, y + baseline + 5),
-        (0, 0, 0),
-        -1
-    )
 
+def centered_text(image, text, y, scale, thickness=2):
+    size, _ = cv2.getTextSize(
+        text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness
+    )
+    x = max(10, (image.shape[1] - size[0]) // 2)
     cv2.putText(
-        img,
+        image,
         text,
         (x, y),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -95,540 +113,335 @@ def draw_text(img, text, x, y, scale=0.62):
     )
 
 
-# =========================================================
-# MFI ACILIS EKRANI
-# =========================================================
-
 def show_splash():
-    logo = cv2.imread(str(LOGO_PATH))
+    open_fullscreen_window()
 
-    if logo is None:
-        print(f"Logo okunamadi: {LOGO_PATH}")
-        return
+    splash = np.zeros((SCREEN_HEIGHT, SCREEN_WIDTH, 3), dtype=np.uint8)
+    logo = cv2.imread(str(LOGO_PATH), cv2.IMREAD_COLOR)
 
-    splash_width = 1280
-    splash_height = 720
+    if logo is not None:
+        logo_h, logo_w = logo.shape[:2]
+        max_w = int(SCREEN_WIDTH * 0.72)
+        max_h = int(SCREEN_HEIGHT * 0.52)
+        scale = min(max_w / logo_w, max_h / logo_h)
 
-    splash = np.zeros(
-        (splash_height, splash_width, 3),
-        dtype=np.uint8
-    )
+        logo = cv2.resize(
+            logo,
+            (max(1, int(logo_w * scale)), max(1, int(logo_h * scale))),
+            interpolation=cv2.INTER_AREA
+        )
 
-    logo_height, logo_width = logo.shape[:2]
+        h, w = logo.shape[:2]
+        x = (SCREEN_WIDTH - w) // 2
+        y = max(15, int(SCREEN_HEIGHT * 0.05))
+        splash[y:y + h, x:x + w] = logo
 
-    max_logo_width = 430
-    max_logo_height = 320
-
-    width_scale = max_logo_width / logo_width
-    height_scale = max_logo_height / logo_height
-    resize_scale = min(width_scale, height_scale)
-
-    new_logo_width = max(
-        1,
-        int(logo_width * resize_scale)
-    )
-
-    new_logo_height = max(
-        1,
-        int(logo_height * resize_scale)
-    )
-
-    logo = cv2.resize(
-        logo,
-        (new_logo_width, new_logo_height),
-        interpolation=cv2.INTER_AREA
-    )
-
-    logo_x = (
-        splash_width - new_logo_width
-    ) // 2
-
-    logo_y = 70
-
-    splash[
-        logo_y:logo_y + new_logo_height,
-        logo_x:logo_x + new_logo_width
-    ] = logo
-
-    first_title = "Connectivity & Smart Devices"
-    second_title = "RPi-MASS"
-
-    first_title_scale = 1.1
-    second_title_scale = 1.7
-
-    first_title_size, _ = cv2.getTextSize(
-        first_title,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        first_title_scale,
+    centered_text(
+        splash,
+        "Connectivity & Smart Devices",
+        int(SCREEN_HEIGHT * 0.78),
+        max(0.55, SCREEN_WIDTH / 1200),
         2
     )
-
-    second_title_size, _ = cv2.getTextSize(
-        second_title,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        second_title_scale,
+    centered_text(
+        splash,
+        "RPi-MASS",
+        int(SCREEN_HEIGHT * 0.91),
+        max(0.85, SCREEN_WIDTH / 750),
         3
     )
 
-    first_title_x = (
-        splash_width - first_title_size[0]
-    ) // 2
-
-    second_title_x = (
-        splash_width - second_title_size[0]
-    ) // 2
-
-    cv2.putText(
-        splash,
-        first_title,
-        (first_title_x, 530),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        first_title_scale,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA
-    )
-
-    cv2.putText(
-        splash,
-        second_title,
-        (second_title_x, 620),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        second_title_scale,
-        (255, 255, 255),
-        3,
-        cv2.LINE_AA
-    )
-
-    cv2.namedWindow(
-        WINDOW_NAME,
-        cv2.WINDOW_NORMAL
-    )
-
-    if FULLSCREEN:
-        cv2.setWindowProperty(
-            WINDOW_NAME,
-            cv2.WND_PROP_FULLSCREEN,
-            cv2.WINDOW_FULLSCREEN
-        )
-
     cv2.imshow(WINDOW_NAME, splash)
-    cv2.waitKey(2500)
-    cv2.destroyWindow(WINDOW_NAME)
+    cv2.waitKey(2200)
 
 
-# =========================================================
-# YARDIMCI FONKSIYONLAR
-# =========================================================
+def draw_panel(frame, arduino_status, emotion, state, command, confidence, fps):
+    overlay = frame.copy()
+    panel_width = min(370, frame.shape[1] - 20)
+    panel_height = min(215, frame.shape[0] - 20)
 
-def softmax(values):
-    values = np.asarray(
-        values,
-        dtype=np.float32
-    )
+    cv2.rectangle(overlay, (10, 10), (10 + panel_width, 10 + panel_height), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.68, frame, 0.32, 0, frame)
 
-    values = values - np.max(values)
+    confidence_text = "---" if confidence is None else f"%{confidence * 100:.0f}"
 
-    exp_values = np.exp(values)
-    total = np.sum(exp_values)
+    rows = [
+        f"Arduino : {arduino_status}",
+        f"Duygu   : {emotion}",
+        f"Durum   : {state}",
+        f"Komut   : {command}",
+        f"Guven   : {confidence_text}",
+        f"FPS     : {fps:.1f}",
+    ]
 
-    if total <= 0:
-        return np.zeros_like(values)
+    y = 42
+    for row in rows:
+        cv2.putText(
+            frame,
+            row,
+            (22, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+        y += 32
 
-    return exp_values / total
+
+def load_models():
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"Model bulunamadi: {MODEL_PATH}")
+
+    if not FACE_CASCADE_PATH.exists():
+        raise FileNotFoundError(f"Yuz modeli bulunamadi: {FACE_CASCADE_PATH}")
+
+    emotion_net = cv2.dnn.readNetFromONNX(str(MODEL_PATH))
+    emotion_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+    emotion_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+    face_detector = cv2.CascadeClassifier(str(FACE_CASCADE_PATH))
+    if face_detector.empty():
+        raise RuntimeError("Haar yuz modeli acilamadi.")
+
+    log("Emotion MobileFaceNet ve yuz modeli yuklendi.")
+    return emotion_net, face_detector
+
+
+def open_camera():
+    camera = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
+
+    if not camera.isOpened():
+        camera = cv2.VideoCapture(CAMERA_INDEX)
+
+    if not camera.isOpened():
+        raise RuntimeError("Kamera acilamadi.")
+
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    log("Kamera acildi.")
+    return camera
+
+
+def expand_face_box(box, image_shape, margin_x=0.18, margin_y=0.22):
+    x, y, w, h = [int(v) for v in box]
+    image_h, image_w = image_shape[:2]
+
+    mx = int(w * margin_x)
+    my = int(h * margin_y)
+
+    x1 = max(0, x - mx)
+    y1 = max(0, y - my)
+    x2 = min(image_w, x + w + mx)
+    y2 = min(image_h, y + h + my)
+
+    return x1, y1, x2, y2
+
+
+def infer_emotion(net, face_bgr):
+    """
+    OpenCV Zoo model preprocessing:
+    BGR -> RGB, 112x112, [0,1], then (x - 0.5) / 0.5.
+    The official model generally returns a class label named 'label'.
+    """
+    if face_bgr is None or face_bgr.size == 0:
+        return "NEUTRAL", None
+
+    face = cv2.resize(face_bgr, (112, 112), interpolation=cv2.INTER_AREA)
+    face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+    face = face.astype(np.float32) / 255.0
+    face = (face - 0.5) / 0.5
+    blob = cv2.dnn.blobFromImage(face)
+
+    net.setInput(blob, "data")
+
+    try:
+        output = net.forward(["label"])[0]
+    except cv2.error:
+        output = net.forward()
+
+    values = np.asarray(output).reshape(-1)
+
+    if values.size == 1:
+        index = int(round(float(values[0])))
+        confidence = None
+    else:
+        shifted = values.astype(np.float32) - np.max(values)
+        probabilities = np.exp(shifted)
+        probabilities /= max(float(np.sum(probabilities)), 1e-9)
+        index = int(np.argmax(probabilities))
+        confidence = float(probabilities[index])
+
+    if not 0 <= index < len(EMOTIONS):
+        return "NEUTRAL", confidence
+
+    return EMOTIONS[index], confidence
 
 
 def emotion_to_state(emotion):
-    if emotion in (
-        "ANGRY",
-        "DISGUST",
-        "FEAR",
-        "CONTEMPT"
-    ):
+    if emotion in ("ANGRY", "DISGUST", "FEARFUL"):
         return "GERGIN"
-
     if emotion == "SAD":
         return "STRESLI"
-
     return "NORMAL"
 
 
-# =========================================================
-# ARDUINO BAGLANTISI
-# =========================================================
-
 def connect_arduino():
     if ArduinoController is None:
-        print(
-            "ArduinoController bulunamadi. "
-            "Kamera modu devam ediyor."
-        )
+        log("arduino_controller.py bulunamadi.")
         return None
 
     try:
         arduino = ArduinoController()
-        connected = arduino.connect()
-
-        if connected is False:
-            print(
-                "Arduino baglantisi kurulamadi. "
-                "Kamera modu devam ediyor."
-            )
+        result = arduino.connect()
+        if result is False:
+            log("Arduino baglanamadi.")
             return None
-
-        print("Arduino baglantisi basarili.")
+        log("Arduino baglandi.")
         return arduino
-
     except Exception as error:
-        print(
-            f"Arduino baglanti hatasi: {error}"
-        )
+        log(f"Arduino baglanti hatasi: {error}")
         return None
 
 
-def send_state_to_arduino(arduino, state):
+def call_first_available(obj, method_names):
+    for name in method_names:
+        method = getattr(obj, name, None)
+        if callable(method):
+            method()
+            return True
+    return False
+
+
+def send_arduino_state(arduino, state):
     if arduino is None:
-        print(
-            "Arduino bagli degil. "
-            f"Algilanan durum: {state}"
-        )
         return False
 
     try:
-        if state == "GERGIN":
-            arduino.tense()
+        method_map = {
+            "NORMAL": ("normal",),
+            "GERGIN": ("tense", "gergin"),
+            "STRESLI": ("stressed", "stresli"),
+            "YORGUN": ("fatigue", "yorgun"),
+        }
 
-        elif state == "STRESLI":
-            arduino.stressed()
+        if call_first_available(arduino, method_map.get(state, ("normal",))):
+            log(f"Arduino komutu gonderildi: {state}")
+            return True
 
-        elif state == "YORGUN":
-            arduino.fatigue()
+        generic = getattr(arduino, "send_command", None)
+        if callable(generic):
+            generic(state)
+            log(f"Arduino komutu gonderildi: {state}")
+            return True
 
-        else:
-            arduino.normal()
+        serial_obj = getattr(arduino, "serial", None)
+        if serial_obj is not None and hasattr(serial_obj, "write"):
+            serial_obj.write((state + "\n").encode("utf-8"))
+            log(f"Arduino komutu gonderildi: {state}")
+            return True
 
-        print(
-            f"Arduino komutu gonderildi: {state}"
-        )
-
-        return True
+        log("ArduinoController icinde uygun komut metodu bulunamadi.")
+        return False
 
     except Exception as error:
-        print(
-            "Arduino komutu gonderilemedi: "
-            f"{error}"
-        )
+        log(f"Arduino komut hatasi: {error}")
         return False
 
 
 def close_arduino(arduino):
     if arduino is None:
         return
-
     try:
-        close_method = getattr(
-            arduino,
-            "close",
-            None
-        )
-
+        close_method = getattr(arduino, "close", None)
         if callable(close_method):
             close_method()
-
     except Exception as error:
-        print(
-            f"Arduino kapatma hatasi: {error}"
-        )
+        log(f"Arduino kapatma hatasi: {error}")
 
-
-# =========================================================
-# MODELLERI YUKLEME
-# =========================================================
-
-def load_emotion_model():
-    if not MODEL_PATH.exists():
-        print(
-            "HATA: ONNX modeli bulunamadi: "
-            f"{MODEL_PATH}"
-        )
-        return None
-
-    try:
-        model = cv2.dnn.readNetFromONNX(
-            str(MODEL_PATH)
-        )
-
-        print(
-            "Duygu modeli basariyla yuklendi."
-        )
-
-        return model
-
-    except cv2.error as error:
-        print(
-            "HATA: Duygu modeli yuklenemedi."
-        )
-        print(error)
-        return None
-
-
-def load_face_detector():
-    if not FACE_CASCADE_PATH.exists():
-        print(
-            "HATA: Haar Cascade bulunamadi: "
-            f"{FACE_CASCADE_PATH}"
-        )
-        return None
-
-    detector = cv2.CascadeClassifier(
-        str(FACE_CASCADE_PATH)
-    )
-
-    if detector.empty():
-        print(
-            "HATA: Yuz algilama modeli "
-            "acilamadi."
-        )
-        return None
-
-    print(
-        "Yuz algilama modeli basariyla "
-        "yuklendi."
-    )
-
-    return detector
-
-
-# =========================================================
-# KAMERAYI ACMA
-# =========================================================
-
-def open_camera():
-    camera = cv2.VideoCapture(
-        CAMERA_INDEX,
-        cv2.CAP_V4L2
-    )
-
-    if not camera.isOpened():
-        camera = cv2.VideoCapture(
-            CAMERA_INDEX
-        )
-
-    if not camera.isOpened():
-        print("HATA: Kamera acilamadi.")
-        return None
-
-    camera.set(
-        cv2.CAP_PROP_FRAME_WIDTH,
-        CAMERA_WIDTH
-    )
-
-    camera.set(
-        cv2.CAP_PROP_FRAME_HEIGHT,
-        CAMERA_HEIGHT
-    )
-
-    camera.set(
-        cv2.CAP_PROP_BUFFERSIZE,
-        1
-    )
-
-    print("Kamera basariyla acildi.")
-    return camera
-
-
-# =========================================================
-# DUYGU ANALIZI
-# =========================================================
-
-def detect_emotion(model, face_gray):
-    try:
-        if (
-            face_gray is None
-            or face_gray.size == 0
-        ):
-            return "NEUTRAL", 0.0
-
-        resized_face = cv2.resize(
-            face_gray,
-            (64, 64),
-            interpolation=cv2.INTER_AREA
-        )
-
-        normalized_face = (
-            resized_face.astype(np.float32)
-            / 255.0
-        )
-
-        blob = normalized_face.reshape(
-            1,
-            1,
-            64,
-            64
-        )
-
-        model.setInput(blob)
-        prediction = model.forward()
-
-        prediction = np.asarray(
-            prediction,
-            dtype=np.float32
-        ).reshape(-1)
-
-        probabilities = softmax(
-            prediction
-        )
-
-        emotion_index = int(
-            np.argmax(probabilities)
-        )
-
-        confidence = float(
-            probabilities[emotion_index]
-        )
-
-        if emotion_index >= len(
-            EMOTION_LABELS
-        ):
-            return "NEUTRAL", 0.0
-
-        emotion = EMOTION_LABELS[
-            emotion_index
-        ]
-
-        return emotion, confidence
-
-    except Exception as error:
-        print(
-            f"Duygu analiz hatasi: {error}"
-        )
-        return "NEUTRAL", 0.0
-# =========================================================
-# ANA PROGRAM
-# =========================================================
 
 def main():
-    print(
-        "RPi-MASS duygu algilama sistemi "
-        "baslatiliyor..."
-    )
-
+    log("RPi-MASS baslatiliyor.")
     show_splash()
 
-    emotion_model = load_emotion_model()
-
-    if emotion_model is None:
-        return
-
-    face_detector = load_face_detector()
-
-    if face_detector is None:
-        return
-
+    emotion_net, face_detector = load_models()
     camera = open_camera()
-
-    if camera is None:
-        return
-
-    cv2.namedWindow(
-        WINDOW_NAME,
-        cv2.WINDOW_NORMAL
-    )
-
-    if FULLSCREEN:
-        cv2.setWindowProperty(
-            WINDOW_NAME,
-            cv2.WND_PROP_FULLSCREEN,
-            cv2.WINDOW_FULLSCREEN
-        )
-
     arduino = connect_arduino()
 
-    frame_count = 0
-    last_faces = []
+    open_fullscreen_window()
 
-    candidate_state = ""
-    candidate_count = 0
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = None
 
-    last_sent_state = ""
-    last_command_time = 0.0
+    frame_number = 0
+    fps_count = 0
+    fps = 0.0
+    fps_time = time.time()
+
+    last_face = None
+    no_face_frames = FACE_HOLD_FRAMES + 1
 
     shown_emotion = "BEKLEME"
     shown_state = "BEKLEME"
-    shown_command = "HENUZ GONDERILMEDI"
+    shown_command = "HENUZ YOK"
+    shown_confidence = None
 
-    confidence = 0.0
-
-    fps = 0.0
-    fps_counter = 0
-    fps_start_time = time.time()
-
-    # ONNX duygu analizi burada ayri
-    # bir is parcaciginda calisacak.
-    analysis_executor = ThreadPoolExecutor(
-        max_workers=1
-    )
-
-    analysis_future = None
+    candidate_state = ""
+    candidate_count = 0
+    last_sent_state = ""
+    last_command_time = 0.0
 
     try:
         while True:
-            success, frame = camera.read()
+            ok, frame = camera.read()
+            if not ok:
+                raise RuntimeError("Kameradan goruntu alinamadi.")
 
-            if not success:
-                print(
-                    "Kameradan goruntu alinamadi."
+            frame_number += 1
+            fps_count += 1
+
+            elapsed = time.time() - fps_time
+            if elapsed >= 1.0:
+                fps = fps_count / elapsed
+                fps_count = 0
+                fps_time = time.time()
+
+            frame = cv2.flip(frame, 1)
+
+            if frame_number % FACE_DETECT_EVERY == 0:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                gray = cv2.equalizeHist(gray)
+
+                small = cv2.resize(
+                    gray, None, fx=0.65, fy=0.65, interpolation=cv2.INTER_AREA
                 )
-                break
 
-            frame_count += 1
-            fps_counter += 1
-
-            fps_elapsed = (
-                time.time() - fps_start_time
-            )
-
-            if fps_elapsed >= 1.0:
-                fps = (
-                    fps_counter / fps_elapsed
+                faces = face_detector.detectMultiScale(
+                    small,
+                    scaleFactor=1.08,
+                    minNeighbors=4,
+                    minSize=(50, 50),
+                    flags=cv2.CASCADE_SCALE_IMAGE
                 )
 
-                fps_counter = 0
-                fps_start_time = time.time()
+                if len(faces) > 0:
+                    face = max(faces, key=lambda item: item[2] * item[3])
+                    scale_back = 1.0 / 0.65
+                    last_face = tuple(int(v * scale_back) for v in face)
+                    no_face_frames = 0
+                else:
+                    no_face_frames += FACE_DETECT_EVERY
+                    if no_face_frames > FACE_HOLD_FRAMES:
+                        last_face = None
 
-            frame = cv2.flip(
-                frame,
-                1
-            )
-
-            gray = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2GRAY
-            )
-
-            # Arka plandaki ONNX analizi
-            # bittiyse sonucu burada al.
-            if (
-                analysis_future is not None
-                and analysis_future.done()
-            ):
+            if future is not None and future.done():
                 try:
-                    emotion, confidence = (
-                        analysis_future.result()
-                    )
-
+                    emotion, confidence = future.result()
                     shown_emotion = emotion
-
-                    if (
-                        confidence
-                        < MIN_CONFIDENCE
-                    ):
-                        state = "NORMAL"
-                    else:
-                        state = emotion_to_state(
-                            emotion
-                        )
-
+                    shown_confidence = confidence
+                    state = emotion_to_state(emotion)
                     shown_state = state
 
                     if state == candidate_state:
@@ -638,139 +451,33 @@ def main():
                         candidate_count = 1
 
                     now = time.time()
-
-                    stable_enough = (
-                        candidate_count
-                        >= STABLE_FRAME_COUNT
-                    )
-
-                    state_changed = (
-                        state
-                        != last_sent_state
-                    )
-
-                    interval_passed = (
-                        now - last_command_time
-                        >= COMMAND_INTERVAL
-                    )
-
                     if (
-                        stable_enough
-                        and state_changed
-                        and interval_passed
+                        candidate_count >= STATE_STABLE_COUNT
+                        and state != last_sent_state
+                        and now - last_command_time >= COMMAND_INTERVAL
                     ):
-                        command_sent = (
-                            send_state_to_arduino(
-                                arduino,
-                                state
-                            )
-                        )
-
-                        shown_command = state
-
-                        if command_sent:
+                        if send_arduino_state(arduino, state):
                             last_sent_state = state
                             last_command_time = now
-
+                        shown_command = state
                 except Exception as error:
-                    print(
-                        "Duygu analiz sonucu "
-                        "okunamadi: "
-                        f"{error}"
+                    log(f"Duygu analiz hatasi: {error}")
+                future = None
+
+            if last_face is not None:
+                x, y, w, h = last_face
+                x1, y1, x2, y2 = expand_face_box(last_face, frame.shape)
+                face_crop = frame[y1:y2, x1:x2]
+
+                if (
+                    frame_number % EMOTION_EVERY == 0
+                    and future is None
+                    and face_crop.size > 0
+                ):
+                    future = executor.submit(
+                        infer_emotion, emotion_net, face_crop.copy()
                     )
 
-                analysis_future = None
-
-            # Belirlenen kare araliginda
-            # yuz tespiti yap.
-            if (
-                frame_count
-                % PROCESS_EVERY_N_FRAMES
-                == 0
-            ):
-                small_gray = cv2.resize(
-                    gray,
-                    None,
-                    fx=0.5,
-                    fy=0.5,
-                    interpolation=cv2.INTER_AREA
-                )
-
-                detected_faces = (
-                    face_detector.detectMultiScale(
-                        small_gray,
-                        scaleFactor=1.2,
-                        minNeighbors=4,
-                        minSize=(40, 40)
-                    )
-                )
-
-                last_faces = [
-                    (
-                        int(x * 2),
-                        int(y * 2),
-                        int(w * 2),
-                        int(h * 2)
-                    )
-                    for x, y, w, h
-                    in detected_faces
-                ]
-
-                if last_faces:
-                    largest_face = max(
-                        last_faces,
-                        key=lambda face:
-                        face[2] * face[3]
-                    )
-
-                    x, y, w, h = largest_face
-
-                    frame_height, frame_width = (
-                        gray.shape[:2]
-                    )
-
-                    x = max(0, x)
-                    y = max(0, y)
-
-                    x_end = min(
-                        frame_width,
-                        x + w
-                    )
-
-                    y_end = min(
-                        frame_height,
-                        y + h
-                    )
-
-                    face_gray = gray[
-                        y:y_end,
-                        x:x_end
-                    ]
-
-                    # Yeni analiz sadece onceki
-                    # analiz bittiyse baslatilir.
-                    if (
-                        face_gray.size > 0
-                        and analysis_future is None
-                    ):
-                        analysis_future = (
-                            analysis_executor.submit(
-                                detect_emotion,
-                                emotion_model,
-                                face_gray.copy()
-                            )
-                        )
-
-                else:
-                    shown_emotion = "YUZ YOK"
-                    shown_state = "BEKLEME"
-                    confidence = 0.0
-
-                    candidate_state = ""
-                    candidate_count = 0
-
-            # Yuz cercevelerini ekrana ciz.
-            for x, y, w, h in last_faces:
                 cv2.rectangle(
                     frame,
                     (x, y),
@@ -778,96 +485,48 @@ def main():
                     (255, 255, 255),
                     2
                 )
-
-            if arduino is not None:
-                arduino_status = "BAGLI"
             else:
-                arduino_status = (
-                    "BAGLI DEGIL"
-                )
+                shown_emotion = "YUZ YOK"
+                shown_state = "BEKLEME"
+                shown_confidence = None
+                candidate_state = ""
+                candidate_count = 0
 
-            draw_text(
-                frame,
-                f"Arduino : {arduino_status}",
-                15,
-                35
+            display = resize_to_fill(frame, SCREEN_WIDTH, SCREEN_HEIGHT)
+
+            arduino_status = "BAGLI" if arduino is not None else "BAGLI DEGIL"
+            draw_panel(
+                display,
+                arduino_status,
+                shown_emotion,
+                shown_state,
+                shown_command,
+                shown_confidence,
+                fps
             )
 
-            draw_text(
-                frame,
-                f"Duygu   : {shown_emotion}",
-                15,
-                67
-            )
+            cv2.imshow(WINDOW_NAME, display)
+            key = cv2.waitKey(1) & 0xFF
 
-            draw_text(
-                frame,
-                f"Durum   : {shown_state}",
-                15,
-                99
-            )
-
-            draw_text(
-                frame,
-                f"Komut   : {shown_command}",
-                15,
-                131
-            )
-
-            draw_text(
-                frame,
-                (
-                    "Guven   : "
-                    f"%{confidence * 100:.0f}"
-                ),
-                15,
-                163
-            )
-
-            draw_text(
-                frame,
-                f"FPS     : {fps:.1f}",
-                15,
-                195
-            )
-
-            cv2.imshow(
-                WINDOW_NAME,
-                frame
-            )
-
-            pressed_key = (
-                cv2.waitKey(1) & 0xFF
-            )
-
-            if pressed_key == ord("q"):
+            if key in (27, ord("q")):
                 break
-
-            if pressed_key == 27:
-                break
-
-    except KeyboardInterrupt:
-        print("Program durduruldu.")
 
     finally:
-        if (
-            analysis_future is not None
-            and not analysis_future.done()
-        ):
-            analysis_future.cancel()
+        if future is not None and not future.done():
+            future.cancel()
 
-        analysis_executor.shutdown(
-            wait=False,
-            cancel_futures=True
-        )
-
+        executor.shutdown(wait=False, cancel_futures=True)
         close_arduino(arduino)
-
         camera.release()
         cv2.destroyAllWindows()
-
-        print("Program sonlandi.")
+        log("RPi-MASS kapatildi.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        error = traceback.format_exc()
+        log(error)
+        print(error)
+        sys.exit(1)
