@@ -1,78 +1,65 @@
+#!/usr/bin/env python3
+import glob
 import time
 import serial
 
+class NucleoController:
+    VALID_COMMANDS = {"NORMAL", "TENSE", "STRESSED", "FATIGUED", "OFF"}
 
-class ArduinoController:
-    """Raspberry Pi ile Arduino arasındaki seri haberleşmeyi yönetir."""
-
-    def __init__(
-        self,
-        port: str = "/dev/ttyUSB0",
-        baud_rate: int = 9600
-    ) -> None:
+    def __init__(self, port=None, baudrate=115200, timeout=1.0):
         self.port = port
-        self.baud_rate = baud_rate
-        self.serial_connection = None
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.serial = None
 
-    def connect(self) -> bool:
-        try:
-            self.serial_connection = serial.Serial(
-                self.port,
-                self.baud_rate,
-                timeout=1
-            )
+    def _find_port(self):
+        if self.port:
+            return self.port
+        ports = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
+        return ports[0] if ports else None
 
-            time.sleep(2)
-            print(f"Arduino bağlandı: {self.port}")
+    def connect(self):
+        if self.serial is not None and self.serial.is_open:
             return True
-
-        except serial.SerialException as error:
-            print(f"Arduino bağlantı hatası: {error}")
+        port = self._find_port()
+        if port is None:
+            print("No Nucleo serial port found.")
             return False
-
-    def send_command(self, command: str) -> bool:
-        if self.serial_connection is None:
-            print("Arduino bağlantısı kurulmamış.")
-            return False
-
         try:
-            command = command.strip().upper()
-            self.serial_connection.write(
-                f"{command}\n".encode("utf-8")
-            )
-
-            print(f"Gönderilen komut: {command}")
+            self.serial = serial.Serial(port=port, baudrate=self.baudrate,
+                                        timeout=self.timeout, write_timeout=self.timeout)
+            self.port = port
+            time.sleep(2.0)
+            self.serial.reset_input_buffer()
+            self.serial.reset_output_buffer()
+            print(f"Nucleo connected: {self.port}")
             return True
-
-        except serial.SerialException as error:
-            print(f"Komut gönderme hatası: {error}")
+        except Exception as error:
+            print(f"Nucleo connection failed: {error}")
+            self.serial = None
             return False
 
-    def normal(self) -> bool:
-        return self.send_command("NORMAL")
+    def send_command(self, command):
+        command = str(command).strip().upper()
+        if command not in self.VALID_COMMANDS:
+            raise ValueError(f"Unsupported Nucleo command: {command}")
+        if self.serial is None or not self.serial.is_open:
+            if not self.connect():
+                raise RuntimeError("Nucleo is not connected.")
+        self.serial.write((command + "\n").encode("utf-8"))
+        self.serial.flush()
+        print(f"TX -> {command}")
 
-    def fatigue(self) -> bool:
-        return self.send_command("YORGUN")
+    def normal(self): self.send_command("NORMAL")
+    def tense(self): self.send_command("TENSE")
+    def stressed(self): self.send_command("STRESSED")
+    def fatigued(self): self.send_command("FATIGUED")
+    def off(self): self.send_command("OFF")
 
-    def tense(self) -> bool:
-        return self.send_command("GERGIN")
-
-    def stressed(self) -> bool:
-        return self.send_command("STRESLI")
-
-    def pump_test(self) -> bool:
-        return self.send_command("POMPA")
-
-    def fan_test(self) -> bool:
-        return self.send_command("FAN")
-
-    def turn_off(self) -> bool:
-        return self.send_command("KAPAT")
-
-    def close(self) -> None:
-        if self.serial_connection is not None:
-            self.turn_off()
-            time.sleep(0.1)
-            self.serial_connection.close()
-            self.serial_connection = None
-            print("Arduino bağlantısı kapatıldı.")
+    def close(self):
+        if self.serial is not None:
+            try:
+                if self.serial.is_open:
+                    self.serial.close()
+            finally:
+                self.serial = None
