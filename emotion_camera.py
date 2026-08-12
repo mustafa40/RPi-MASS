@@ -145,7 +145,7 @@ def draw_panel(frame, arduino_status, emotion, state, command, confidence, fps):
     confidence_text = "---" if confidence is None else f"%{confidence * 100:.0f}"
 
     rows = [
-        f"Arduino : {arduino_status}",
+        f"Nucleo : {arduino_status}",
         f"Emotion : {emotion}",
         f"State   : {state}",
         f"Command : {command}",
