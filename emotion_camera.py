@@ -10,14 +10,14 @@ import cv2
 import numpy as np
 
 try:
-    from arduino_controller import ArduinoController
+    from nucleo_controller import NucleoController
 except ImportError:
-    ArduinoController = None
+    NucleoController = None
 
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "emotion-mobilefacenet.onnx"
-LOGO_PATH = BASE_DIR / "MFI_LOGO.PNG"
+LOGO_PATH = BASE_DIR / "mfi_logo.png"
 LOG_PATH = BASE_DIR / "rpi_mass.log"
 
 FACE_CASCADE_PATH = Path(
@@ -260,20 +260,21 @@ def infer_emotion(net, face_bgr):
 
 
 def emotion_to_state(emotion):
+    """Common English state set used by both Raspberry Pi and Nucleo."""
     if emotion in ("ANGRY", "DISGUST", "FEARFUL"):
-        return "GERGIN"
+        return "TENSE"
     if emotion == "SAD":
-        return "STRESLI"
+        return "STRESSED"
     return "NORMAL"
 
 
 def connect_arduino():
-    if ArduinoController is None:
-        log("arduino_controller.py bulunamadi.")
+    if NucleoController is None:
+        log("nucleo_controller.py bulunamadi.")
         return None
 
     try:
-        arduino = ArduinoController()
+        arduino = NucleoController()
         result = arduino.connect()
         if result is False:
             log("Arduino baglanamadi.")
@@ -285,50 +286,18 @@ def connect_arduino():
         return None
 
 
-def call_first_available(obj, method_names):
-    for name in method_names:
-        method = getattr(obj, name, None)
-        if callable(method):
-            method()
-            return True
-    return False
-
-
 def send_arduino_state(arduino, state):
+    """Send exactly the same English state string that the Nucleo expects."""
     if arduino is None:
         return False
 
     try:
-        method_map = {
-            "NORMAL": ("normal",),
-            "GERGIN": ("tense", "gergin"),
-            "STRESLI": ("stressed", "stresli"),
-            "YORGUN": ("fatigue", "yorgun"),
-        }
-
-        if call_first_available(arduino, method_map.get(state, ("normal",))):
-            log(f"Arduino komutu gonderildi: {state}")
-            return True
-
-        generic = getattr(arduino, "send_command", None)
-        if callable(generic):
-            generic(state)
-            log(f"Arduino komutu gonderildi: {state}")
-            return True
-
-        serial_obj = getattr(arduino, "serial", None)
-        if serial_obj is not None and hasattr(serial_obj, "write"):
-            serial_obj.write((state + "\n").encode("utf-8"))
-            log(f"Arduino komutu gonderildi: {state}")
-            return True
-
-        log("ArduinoController icinde uygun komut metodu bulunamadi.")
-        return False
-
+        arduino.send_command(state)
+        log(f"Nucleo command sent: {state}")
+        return True
     except Exception as error:
-        log(f"Arduino komut hatasi: {error}")
+        log(f"Nucleo command error: {error}")
         return False
-
 
 def close_arduino(arduino):
     if arduino is None:
@@ -421,13 +390,7 @@ def main():
                     shown_emotion = emotion
                     shown_confidence = confidence
                     state = emotion_to_state(emotion)
-                    state_labels = {
-                        "NORMAL": "NORMAL",
-                        "GERGIN": "TENSE",
-                        "STRESLI": "STRESSED",
-                        "YORGUN": "FATIGUED",
-                    }
-                    shown_state = state_labels.get(state, state)
+                    shown_state = state
 
                     if state == candidate_state:
                         candidate_count += 1
@@ -444,7 +407,7 @@ def main():
                         if send_arduino_state(arduino, state):
                             last_sent_state = state
                             last_command_time = now
-                        shown_command = state_labels.get(state, state)
+                        shown_command = state
                 except Exception as error:
                     log(f"Duygu analiz hatasi: {error}")
                 future = None
