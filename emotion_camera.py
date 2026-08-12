@@ -23,6 +23,9 @@ LOG_PATH = BASE_DIR / "rpi_mass.log"
 FACE_CASCADE_PATH = Path(
     "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
 )
+EYE_CASCADE_PATH = Path(
+    "/usr/share/opencv4/haarcascades/haarcascade_eye_tree_eyeglasses.xml"
+)
 
 WINDOW_NAME = "RPi-MASS"
 CAMERA_INDEX = 0
@@ -34,6 +37,16 @@ EMOTION_EVERY = 8
 FACE_HOLD_FRAMES = 32
 STATE_STABLE_COUNT = 2
 COMMAND_INTERVAL = 1.0
+
+# State separation tuning
+TENSE_STABLE_COUNT = 2
+STRESSED_STABLE_COUNT = 3
+NORMAL_STABLE_COUNT = 2
+
+# Fatigue detection
+EYE_CHECK_EVERY = 3
+EYE_CLOSED_TIME = 1.6
+EYE_REOPEN_RESET_TIME = 0.20
 
 EMOTIONS = [
     "ANGRY",
@@ -145,7 +158,7 @@ def draw_panel(frame, arduino_status, emotion, state, command, confidence, fps):
     confidence_text = "---" if confidence is None else f"%{confidence * 100:.0f}"
 
     rows = [
-        f"Nucleo : {arduino_status}",
+        f"Nucleo  : {arduino_status}",
         f"Emotion : {emotion}",
         f"State   : {state}",
         f"Command : {command}",
@@ -170,21 +183,29 @@ def draw_panel(frame, arduino_status, emotion, state, command, confidence, fps):
 
 def load_models():
     if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"Model bulunamadi: {MODEL_PATH}")
+        raise FileNotFoundError(f"Model not found: {MODEL_PATH}")
 
     if not FACE_CASCADE_PATH.exists():
-        raise FileNotFoundError(f"Yuz modeli bulunamadi: {FACE_CASCADE_PATH}")
+        raise FileNotFoundError(f"Face detector not found: {FACE_CASCADE_PATH}")
+
+    if not EYE_CASCADE_PATH.exists():
+        raise FileNotFoundError(f"Eye detector not found: {EYE_CASCADE_PATH}")
 
     emotion_net = cv2.dnn.readNetFromONNX(str(MODEL_PATH))
     emotion_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
     emotion_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
     face_detector = cv2.CascadeClassifier(str(FACE_CASCADE_PATH))
-    if face_detector.empty():
-        raise RuntimeError("Haar yuz modeli acilamadi.")
+    eye_detector = cv2.CascadeClassifier(str(EYE_CASCADE_PATH))
 
-    log("Emotion MobileFaceNet ve yuz modeli yuklendi.")
-    return emotion_net, face_detector
+    if face_detector.empty():
+        raise RuntimeError("Haar face detector could not be opened.")
+
+    if eye_detector.empty():
+        raise RuntimeError("Haar eye detector could not be opened.")
+
+    log("Emotion, face and eye models loaded.")
+    return emotion_net, face_detector, eye_detector
 
 
 def open_camera():
@@ -260,29 +281,42 @@ def infer_emotion(net, face_bgr):
 
 
 def emotion_to_state(emotion):
-    """Common English state set used by both Raspberry Pi and Nucleo."""
-    if emotion in ("ANGRY", "DISGUST", "FEARFUL"):
+    """
+    Sharp state mapping.
+    FATIGUED is NOT produced by the emotion model; eye-closure logic overrides it.
+    """
+    if emotion in ("ANGRY", "DISGUST"):
         return "TENSE"
+
     if emotion == "SAD":
         return "STRESSED"
+
     return "NORMAL"
+
+
+def required_stable_count(state):
+    if state == "TENSE":
+        return TENSE_STABLE_COUNT
+    if state == "STRESSED":
+        return STRESSED_STABLE_COUNT
+    return NORMAL_STABLE_COUNT
 
 
 def connect_arduino():
     if NucleoController is None:
-        log("nucleo_controller.py bulunamadi.")
+        log("nucleo_controller.py not found.")
         return None
 
     try:
         arduino = NucleoController()
         result = arduino.connect()
         if result is False:
-            log("Arduino baglanamadi.")
+            log("Nucleo connection failed.")
             return None
-        log("Arduino baglandi.")
+        log("Nucleo connected.")
         return arduino
     except Exception as error:
-        log(f"Arduino baglanti hatasi: {error}")
+        log(f"Nucleo connection error: {error}")
         return None
 
 
@@ -307,14 +341,14 @@ def close_arduino(arduino):
         if callable(close_method):
             close_method()
     except Exception as error:
-        log(f"Arduino kapatma hatasi: {error}")
+        log(f"Nucleo close error: {error}")
 
 
 def main():
     log("RPi-MASS baslatiliyor.")
     show_splash()
 
-    emotion_net, face_detector = load_models()
+    emotion_net, face_detector, eye_detector = load_models()
     camera = open_camera()
     arduino = connect_arduino()
 
@@ -330,6 +364,10 @@ def main():
 
     last_face = None
     no_face_frames = FACE_HOLD_FRAMES + 1
+
+    eyes_closed_since = None
+    eyes_open_since = time.time()
+    eyes_currently_open = True
 
     shown_emotion = "WAITING"
     shown_state = "WAITING"
@@ -390,6 +428,15 @@ def main():
                     shown_emotion = emotion
                     shown_confidence = confidence
                     state = emotion_to_state(emotion)
+
+                    fatigue_active_now = (
+                        eyes_closed_since is not None
+                        and (time.time() - eyes_closed_since) >= EYE_CLOSED_TIME
+                    )
+
+                    if fatigue_active_now:
+                        state = "FATIGUED"
+
                     shown_state = state
 
                     if state == candidate_state:
@@ -400,7 +447,7 @@ def main():
 
                     now = time.time()
                     if (
-                        candidate_count >= STATE_STABLE_COUNT
+                        candidate_count >= required_stable_count(state)
                         and state != last_sent_state
                         and now - last_command_time >= COMMAND_INTERVAL
                     ):
@@ -416,6 +463,54 @@ def main():
                 x, y, w, h = last_face
                 x1, y1, x2, y2 = expand_face_box(last_face, frame.shape)
                 face_crop = frame[y1:y2, x1:x2]
+
+                # -------------------------------------------------
+                # FATIGUE OVERRIDE - prolonged eye closure
+                # -------------------------------------------------
+                if frame_number % EYE_CHECK_EVERY == 0 and face_crop.size > 0:
+                    face_gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+
+                    # Only search the upper ~60% of the face for eyes.
+                    upper_h = max(1, int(face_gray.shape[0] * 0.62))
+                    eye_roi = face_gray[:upper_h, :]
+
+                    eyes = eye_detector.detectMultiScale(
+                        eye_roi,
+                        scaleFactor=1.08,
+                        minNeighbors=5,
+                        minSize=(18, 18)
+                    )
+
+                    now_eye = time.time()
+
+                    if len(eyes) > 0:
+                        eyes_currently_open = True
+                        eyes_open_since = now_eye
+                        eyes_closed_since = None
+                    else:
+                        eyes_currently_open = False
+
+                        if eyes_closed_since is None:
+                            eyes_closed_since = now_eye
+
+                        closed_duration = now_eye - eyes_closed_since
+
+                        if closed_duration >= EYE_CLOSED_TIME:
+                            shown_state = "FATIGUED"
+                            shown_command = "FATIGUED"
+
+                            if last_sent_state != "FATIGUED":
+                                if send_arduino_state(arduino, "FATIGUED"):
+                                    last_sent_state = "FATIGUED"
+                                    last_command_time = now_eye
+
+                            candidate_state = ""
+                            candidate_count = 0
+
+                fatigue_active = (
+                    eyes_closed_since is not None
+                    and (time.time() - eyes_closed_since) >= EYE_CLOSED_TIME
+                )
 
                 if (
                     frame_number % EMOTION_EVERY == 0
@@ -439,13 +534,15 @@ def main():
                 shown_confidence = None
                 candidate_state = ""
                 candidate_count = 0
+                eyes_closed_since = None
+                eyes_currently_open = True
 
             display = resize_to_fill(frame, SCREEN_WIDTH, SCREEN_HEIGHT)
 
-            arduino_status = "CONNECTED" if arduino is not None else "DISCONNECTED"
+            nucleo_status = "CONNECTED" if arduino is not None else "DISCONNECTED"
             draw_panel(
                 display,
-                arduino_status,
+                nucleo_status,
                 shown_emotion,
                 shown_state,
                 shown_command,
