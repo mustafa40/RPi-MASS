@@ -17,30 +17,43 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Accept either the old short FER filename or the official OpenCV Zoo filename.
 FER_CANDIDATES = [
     BASE_DIR / "emotion-mobilefacenet.onnx",
     BASE_DIR / "facial_expression_recognition_mobilefacenet_2022july.onnx",
 ]
+
 YUNET_PATH = BASE_DIR / "face_detection_yunet_2023mar.onnx"
 LOGO_PATH = BASE_DIR / "mfi_logo.png"
 LOG_PATH = BASE_DIR / "rpi_mass.log"
 
-WINDOW_NAME = "RPi-MASS YUNET TEST"
+EYE_CASCADE_PATH = Path(
+    "/usr/share/opencv4/haarcascades/haarcascade_eye_tree_eyeglasses.xml"
+)
+
+WINDOW_NAME = "RPi-MASS"
 CAMERA_INDEX = 0
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
-# Performance / stability
-FACE_DETECT_EVERY = 2
-EMOTION_EVERY = 6
-STATE_STABLE_COUNT = 3
-COMMAND_INTERVAL = 1.0
+# ---------------------------------------------------------
+# PERFORMANCE / STABILITY
+# ---------------------------------------------------------
 
-# Fatigue: eyes closed continuously for this long.
+# YuNet and FER are intentionally not executed on every frame.
+FACE_DETECT_EVERY = 6
+EMOTION_EVERY = 12
+EYE_CHECK_EVERY = 4
+
+COMMAND_INTERVAL = 0.8
+COMMAND_REFRESH_INTERVAL = 3.0
+
+# State must be observed this many consecutive emotion results.
+STATE_CONFIRM_COUNT = 2
+
+# Fatigue is independent from emotion classification.
 FATIGUE_SECONDS = 1.6
+EYE_LOST_GRACE = 0.25
 
-# YuNet
 YUNET_SCORE_THRESHOLD = 0.72
 YUNET_NMS_THRESHOLD = 0.3
 YUNET_TOP_K = 5000
@@ -59,22 +72,28 @@ EMOTIONS = [
 def log(message):
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}"
     print(line)
+
     try:
-        with LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        with LOG_PATH.open("a", encoding="utf-8") as file:
+            file.write(line + "\n")
     except Exception:
         pass
 
 
 def get_screen_size():
     try:
-        output = os.popen("xrandr --current 2>/dev/null | grep '\\*' | head -1").read()
+        output = os.popen(
+            "xrandr --current 2>/dev/null | grep '\\*' | head -1"
+        ).read()
+
         if output.strip():
             value = output.split()[0]
-            w, h = value.split("x")
-            return int(w), int(h)
+            width, height = value.split("x")
+            return int(width), int(height)
+
     except Exception:
         pass
+
     return 800, 480
 
 
@@ -82,413 +101,1015 @@ SCREEN_WIDTH, SCREEN_HEIGHT = get_screen_size()
 
 
 def resize_to_fill(image, target_width, target_height):
-    h, w = image.shape[:2]
-    scale = max(target_width / w, target_height / h)
-    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
-    resized = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    x = max(0, (nw - target_width) // 2)
-    y = max(0, (nh - target_height) // 2)
-    return resized[y:y + target_height, x:x + target_width]
+    image_height, image_width = image.shape[:2]
+
+    scale = max(
+        target_width / image_width,
+        target_height / image_height,
+    )
+
+    new_width = max(
+        1,
+        int(image_width * scale),
+    )
+
+    new_height = max(
+        1,
+        int(image_height * scale),
+    )
+
+    resized = cv2.resize(
+        image,
+        (new_width, new_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    start_x = max(
+        0,
+        (new_width - target_width) // 2,
+    )
+
+    start_y = max(
+        0,
+        (new_height - target_height) // 2,
+    )
+
+    return resized[
+        start_y:start_y + target_height,
+        start_x:start_x + target_width,
+    ]
 
 
 def open_fullscreen_window():
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.moveWindow(WINDOW_NAME, 0, 0)
-    cv2.resizeWindow(WINDOW_NAME, SCREEN_WIDTH, SCREEN_HEIGHT)
-    cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.namedWindow(
+        WINDOW_NAME,
+        cv2.WINDOW_NORMAL,
+    )
+
+    cv2.moveWindow(
+        WINDOW_NAME,
+        0,
+        0,
+    )
+
+    cv2.resizeWindow(
+        WINDOW_NAME,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+    )
+
+    cv2.setWindowProperty(
+        WINDOW_NAME,
+        cv2.WND_PROP_FULLSCREEN,
+        cv2.WINDOW_FULLSCREEN,
+    )
+
     cv2.waitKey(100)
 
 
 def show_splash():
     open_fullscreen_window()
-    logo = cv2.imread(str(LOGO_PATH), cv2.IMREAD_COLOR)
+
+    logo = cv2.imread(
+        str(LOGO_PATH),
+        cv2.IMREAD_COLOR,
+    )
+
     if logo is None:
-        splash = np.zeros((SCREEN_HEIGHT, SCREEN_WIDTH, 3), dtype=np.uint8)
-        log(f"Logo could not be loaded: {LOGO_PATH}")
+        log(
+            f"Logo could not be loaded: {LOGO_PATH}"
+        )
+
+        splash = np.zeros(
+            (
+                SCREEN_HEIGHT,
+                SCREEN_WIDTH,
+                3,
+            ),
+            dtype=np.uint8,
+        )
+
     else:
-        splash = resize_to_fill(logo, SCREEN_WIDTH, SCREEN_HEIGHT)
-    cv2.imshow(WINDOW_NAME, splash)
+        splash = resize_to_fill(
+            logo,
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+        )
+
+    cv2.imshow(
+        WINDOW_NAME,
+        splash,
+    )
+
     cv2.waitKey(1800)
 
 
 def find_fer_model():
-    for p in FER_CANDIDATES:
-        if p.exists():
-            return p
+    for path in FER_CANDIDATES:
+        if path.exists():
+            return path
+
     raise FileNotFoundError(
-        "FER model not found. Expected emotion-mobilefacenet.onnx or "
-        "facial_expression_recognition_mobilefacenet_2022july.onnx"
+        "FER model not found."
     )
 
 
 def load_models():
     fer_path = find_fer_model()
-    if not YUNET_PATH.exists():
-        raise FileNotFoundError(f"YuNet model not found: {YUNET_PATH}")
 
-    fer_net = cv2.dnn.readNetFromONNX(str(fer_path))
-    fer_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-    fer_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+    if not YUNET_PATH.exists():
+        raise FileNotFoundError(
+            f"YuNet model not found: {YUNET_PATH}"
+        )
+
+    if not EYE_CASCADE_PATH.exists():
+        raise FileNotFoundError(
+            f"Eye detector not found: {EYE_CASCADE_PATH}"
+        )
+
+    fer_net = cv2.dnn.readNetFromONNX(
+        str(fer_path)
+    )
+
+    fer_net.setPreferableBackend(
+        cv2.dnn.DNN_BACKEND_OPENCV
+    )
+
+    fer_net.setPreferableTarget(
+        cv2.dnn.DNN_TARGET_CPU
+    )
 
     yunet = cv2.FaceDetectorYN.create(
         str(YUNET_PATH),
         "",
-        (CAMERA_WIDTH, CAMERA_HEIGHT),
+        (
+            CAMERA_WIDTH,
+            CAMERA_HEIGHT,
+        ),
         YUNET_SCORE_THRESHOLD,
         YUNET_NMS_THRESHOLD,
         YUNET_TOP_K,
     )
 
-    log(f"FER model: {fer_path.name}")
-    log(f"YuNet model: {YUNET_PATH.name}")
-    return fer_net, yunet
+    eye_detector = cv2.CascadeClassifier(
+        str(EYE_CASCADE_PATH)
+    )
+
+    if eye_detector.empty():
+        raise RuntimeError(
+            "Eye detector could not be opened."
+        )
+
+    log(
+        f"FER model loaded: {fer_path.name}"
+    )
+
+    log(
+        f"YuNet model loaded: {YUNET_PATH.name}"
+    )
+
+    return (
+        fer_net,
+        yunet,
+        eye_detector,
+    )
 
 
 def open_camera():
-    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(CAMERA_INDEX)
-    if not cap.isOpened():
-        raise RuntimeError("Camera could not be opened.")
+    camera = cv2.VideoCapture(
+        CAMERA_INDEX,
+        cv2.CAP_V4L2,
+    )
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    return cap
+    if not camera.isOpened():
+        camera = cv2.VideoCapture(
+            CAMERA_INDEX
+        )
+
+    if not camera.isOpened():
+        raise RuntimeError(
+            "Camera could not be opened."
+        )
+
+    camera.set(
+        cv2.CAP_PROP_FRAME_WIDTH,
+        CAMERA_WIDTH,
+    )
+
+    camera.set(
+        cv2.CAP_PROP_FRAME_HEIGHT,
+        CAMERA_HEIGHT,
+    )
+
+    camera.set(
+        cv2.CAP_PROP_BUFFERSIZE,
+        1,
+    )
+
+    log("Camera opened.")
+    return camera
 
 
-# Standard 112x112 five-point face template (ArcFace-style).
-DST_5PTS = np.array([
-    [38.2946, 51.6963],
-    [73.5318, 51.5014],
-    [56.0252, 71.7366],
-    [41.5493, 92.3655],
-    [70.7299, 92.2041],
-], dtype=np.float32)
+# ---------------------------------------------------------
+# YUNET FACE ALIGNMENT
+# ---------------------------------------------------------
+
+DST_5PTS = np.array(
+    [
+        [38.2946, 51.6963],
+        [73.5318, 51.5014],
+        [56.0252, 71.7366],
+        [41.5493, 92.3655],
+        [70.7299, 92.2041],
+    ],
+    dtype=np.float32,
+)
 
 
 def yunet_landmarks(face):
-    # YuNet row: x,y,w,h, right-eye?, left-eye?, nose, mouth corners, score.
-    # OpenCV Zoo ordering is five 2D landmarks after bbox.
-    pts = np.asarray(face[4:14], dtype=np.float32).reshape(5, 2)
+    points = np.asarray(
+        face[4:14],
+        dtype=np.float32,
+    ).reshape(5, 2)
 
-    # Ensure first two points are ordered left-to-right in image coordinates
-    # for the alignment template.
-    if pts[0, 0] > pts[1, 0]:
-        pts[[0, 1]] = pts[[1, 0]]
+    if points[0, 0] > points[1, 0]:
+        points[[0, 1]] = points[[1, 0]]
 
-    # Mouth corners also left-to-right.
-    if pts[3, 0] > pts[4, 0]:
-        pts[[3, 4]] = pts[[4, 3]]
+    if points[3, 0] > points[4, 0]:
+        points[[3, 4]] = points[[4, 3]]
 
-    return pts
+    return points
 
 
 def align_face(frame, face):
-    src_pts = yunet_landmarks(face)
+    source_points = yunet_landmarks(
+        face
+    )
+
     matrix, _ = cv2.estimateAffinePartial2D(
-        src_pts,
+        source_points,
         DST_5PTS,
         method=cv2.LMEDS,
     )
+
     if matrix is None:
         return None
 
-    aligned = cv2.warpAffine(
+    return cv2.warpAffine(
         frame,
         matrix,
         (112, 112),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REPLICATE,
     )
-    return aligned
 
+
+# ---------------------------------------------------------
+# BACKGROUND FACE DETECTION
+# ---------------------------------------------------------
+
+def detect_face_yunet(yunet, frame):
+    height, width = frame.shape[:2]
+
+    yunet.setInputSize(
+        (width, height)
+    )
+
+    _, faces = yunet.detect(
+        frame
+    )
+
+    if faces is None or len(faces) == 0:
+        return None
+
+    largest = max(
+        faces,
+        key=lambda face:
+        float(face[2] * face[3]),
+    )
+
+    return largest.copy()
+
+
+# ---------------------------------------------------------
+# EMOTION INFERENCE
+# ---------------------------------------------------------
 
 def infer_emotion(net, aligned_bgr):
-    if aligned_bgr is None or aligned_bgr.size == 0:
+    if (
+        aligned_bgr is None
+        or aligned_bgr.size == 0
+    ):
         return "NEUTRAL", None
 
-    # Keep the preprocessing used by the existing working model.
-    face = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB)
-    face = face.astype(np.float32) / 255.0
-    face = (face - 0.5) / 0.5
+    face = cv2.cvtColor(
+        aligned_bgr,
+        cv2.COLOR_BGR2RGB,
+    )
 
-    blob = cv2.dnn.blobFromImage(face)
-    net.setInput(blob, "data")
+    face = (
+        face.astype(np.float32)
+        / 255.0
+    )
+
+    face = (
+        face - 0.5
+    ) / 0.5
+
+    blob = cv2.dnn.blobFromImage(
+        face
+    )
+
+    net.setInput(
+        blob,
+        "data",
+    )
 
     try:
-        output = net.forward(["label"])[0]
+        output = net.forward(
+            ["label"]
+        )[0]
+
     except cv2.error:
         output = net.forward()
 
-    values = np.asarray(output).reshape(-1)
+    values = np.asarray(
+        output
+    ).reshape(-1)
 
     if values.size == 1:
-        idx = int(round(float(values[0])))
+        index = int(
+            round(
+                float(values[0])
+            )
+        )
+
         confidence = None
+
     else:
-        shifted = values.astype(np.float32) - np.max(values)
-        probs = np.exp(shifted)
-        probs /= max(float(np.sum(probs)), 1e-9)
-        idx = int(np.argmax(probs))
-        confidence = float(probs[idx])
+        shifted = (
+            values.astype(np.float32)
+            - np.max(values)
+        )
 
-    if not 0 <= idx < len(EMOTIONS):
+        probabilities = np.exp(
+            shifted
+        )
+
+        probabilities /= max(
+            float(
+                np.sum(probabilities)
+            ),
+            1e-9,
+        )
+
+        index = int(
+            np.argmax(probabilities)
+        )
+
+        confidence = float(
+            probabilities[index]
+        )
+
+    if not 0 <= index < len(
+        EMOTIONS
+    ):
         return "NEUTRAL", confidence
-    return EMOTIONS[idx], confidence
+
+    return (
+        EMOTIONS[index],
+        confidence,
+    )
 
 
-def expression_to_state(emotion):
-    # Keep states intentionally separated.
-    if emotion in ("ANGRY", "DISGUST"):
+def emotion_to_state(emotion):
+    if emotion in (
+        "ANGRY",
+        "DISGUST",
+    ):
         return "TENSE"
+
     if emotion == "SAD":
         return "STRESSED"
+
     return "NORMAL"
 
 
-def eye_openness_ratio(face):
-    """
-    Geometric fatigue cue from YuNet landmarks.
-    This does not classify emotion. It estimates how far the eye landmarks sit
-    above the nose relative to face height. We calibrate an open-eye baseline
-    during runtime and detect a sustained drop from that baseline.
-    """
-    pts = yunet_landmarks(face)
-    eye_mid = (pts[0] + pts[1]) * 0.5
-    nose = pts[2]
-    h = max(float(face[3]), 1.0)
-    return float((nose[1] - eye_mid[1]) / h)
+# ---------------------------------------------------------
+# EYE / FATIGUE
+# ---------------------------------------------------------
 
+def eyes_are_open(
+    aligned_face,
+    eye_detector,
+):
+    if (
+        aligned_face is None
+        or aligned_face.size == 0
+    ):
+        return None
+
+    gray = cv2.cvtColor(
+        aligned_face,
+        cv2.COLOR_BGR2GRAY,
+    )
+
+    gray = cv2.equalizeHist(
+        gray
+    )
+
+    # Eyes are searched only in the upper area.
+    upper = gray[
+        8:68,
+        8:104,
+    ]
+
+    eyes = eye_detector.detectMultiScale(
+        upper,
+        scaleFactor=1.08,
+        minNeighbors=4,
+        minSize=(14, 14),
+    )
+
+    return len(eyes) >= 1
+
+
+# ---------------------------------------------------------
+# NUCLEO
+# ---------------------------------------------------------
 
 def connect_nucleo():
     if NucleoController is None:
-        log("nucleo_controller.py not found.")
+        log(
+            "nucleo_controller.py not found."
+        )
         return None
+
     try:
         nucleo = NucleoController()
+
         if nucleo.connect() is False:
+            log(
+                "Nucleo connection failed."
+            )
             return None
+
         log("Nucleo connected.")
         return nucleo
-    except Exception as e:
-        log(f"Nucleo connection error: {e}")
+
+    except Exception as error:
+        log(
+            f"Nucleo connection error: {error}"
+        )
         return None
 
 
-def send_state(nucleo, state):
+def send_state(
+    nucleo,
+    state,
+):
     if nucleo is None:
         return False
+
     try:
-        nucleo.send_command(state)
-        log(f"Nucleo command sent: {state}")
+        nucleo.send_command(
+            state
+        )
+
+        log(
+            f"Nucleo command sent: {state}"
+        )
+
         return True
-    except Exception as e:
-        log(f"Nucleo command error: {e}")
+
+    except Exception as error:
+        log(
+            f"Nucleo command error: {error}"
+        )
+
         return False
 
 
-def draw_panel(frame, connected, emotion, state, command, confidence, fps, eye_text):
+# ---------------------------------------------------------
+# UI
+# ---------------------------------------------------------
+
+def draw_panel(
+    frame,
+    connected,
+    emotion,
+    state,
+    eye_text,
+    fps,
+):
     overlay = frame.copy()
-    panel_w = min(390, frame.shape[1] - 20)
-    panel_h = min(245, frame.shape[0] - 20)
-    cv2.rectangle(overlay, (10, 10), (10 + panel_w, 10 + panel_h), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.68, frame, 0.32, 0, frame)
 
-    conf = "---" if confidence is None else f"{confidence * 100:.0f}%"
+    panel_width = min(
+        360,
+        frame.shape[1] - 20,
+    )
+
+    panel_height = min(
+        185,
+        frame.shape[0] - 20,
+    )
+
+    cv2.rectangle(
+        overlay,
+        (10, 10),
+        (
+            10 + panel_width,
+            10 + panel_height,
+        ),
+        (0, 0, 0),
+        -1,
+    )
+
+    cv2.addWeighted(
+        overlay,
+        0.68,
+        frame,
+        0.32,
+        0,
+        frame,
+    )
+
     rows = [
-        f"Nucleo     : {'CONNECTED' if connected else 'DISCONNECTED'}",
-        f"Emotion    : {emotion}",
-        f"State      : {state}",
-        f"Command    : {command}",
-        f"Confidence : {conf}",
-        f"Eyes       : {eye_text}",
-        f"FPS        : {fps:.1f}",
+        (
+            "Nucleo  : "
+            + (
+                "CONNECTED"
+                if connected
+                else "DISCONNECTED"
+            )
+        ),
+        f"Emotion : {emotion}",
+        f"State   : {state}",
+        f"Eyes    : {eye_text}",
+        f"FPS     : {fps:.1f}",
     ]
-    y = 38
-    for row in rows:
-        cv2.putText(frame, row, (22, y), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55, (255, 255, 255), 2, cv2.LINE_AA)
-        y += 29
 
+    y = 40
+
+    for row in rows:
+        cv2.putText(
+            frame,
+            row,
+            (22, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        y += 32
+
+
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
 
 def main():
-    log("YuNet test starting.")
+    log(
+        "RPi-MASS optimized YuNet version starting."
+    )
+
     show_splash()
 
-    fer_net, yunet = load_models()
-    cap = open_camera()
+    (
+        fer_net,
+        yunet,
+        eye_detector,
+    ) = load_models()
+
+    camera = open_camera()
     nucleo = connect_nucleo()
+
     open_fullscreen_window()
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = None
+    # Separate background workers prevent the camera loop from waiting
+    # for YuNet or FER inference.
+    face_executor = ThreadPoolExecutor(
+        max_workers=1
+    )
 
-    frame_no = 0
+    emotion_executor = ThreadPoolExecutor(
+        max_workers=1
+    )
+
+    face_future = None
+    emotion_future = None
+
+    frame_number = 0
+
     fps = 0.0
     fps_count = 0
-    fps_t = time.time()
+    fps_time = time.time()
 
     last_face = None
+    last_aligned_face = None
+
     shown_emotion = "WAITING"
     shown_state = "WAITING"
-    shown_command = "NONE"
-    shown_conf = None
+    eye_text = "WAITING"
 
-    candidate = ""
+    candidate_state = ""
     candidate_count = 0
-    last_sent = ""
-    last_send_t = 0.0
 
-    # Runtime eye baseline.
-    eye_baseline = None
-    closed_since = None
-    eye_text = "CALIBRATING"
+    current_state = ""
+    last_sent_state = ""
+    last_send_time = 0.0
+
+    eyes_closed_since = None
+    last_eye_open_time = time.time()
 
     try:
         while True:
-            ok, frame = cap.read()
-            if not ok:
-                raise RuntimeError("Camera frame could not be read.")
+            ok, frame = camera.read()
 
-            frame = cv2.flip(frame, 1)
-            frame_no += 1
+            if not ok:
+                raise RuntimeError(
+                    "Camera frame could not be read."
+                )
+
+            frame = cv2.flip(
+                frame,
+                1,
+            )
+
+            frame_number += 1
             fps_count += 1
 
             now = time.time()
-            if now - fps_t >= 1.0:
-                fps = fps_count / (now - fps_t)
-                fps_count = 0
-                fps_t = now
 
-            if frame_no % FACE_DETECT_EVERY == 0:
-                h, w = frame.shape[:2]
-                yunet.setInputSize((w, h))
-                _, faces = yunet.detect(frame)
-                if faces is not None and len(faces):
-                    last_face = max(faces, key=lambda f: float(f[2] * f[3])).copy()
-                else:
+            if (
+                now - fps_time
+                >= 1.0
+            ):
+                fps = (
+                    fps_count
+                    / (now - fps_time)
+                )
+
+                fps_count = 0
+                fps_time = now
+
+            # ---------------------------------------------
+            # Start YuNet in background
+            # ---------------------------------------------
+
+            if (
+                frame_number
+                % FACE_DETECT_EVERY
+                == 0
+                and face_future is None
+            ):
+                face_future = (
+                    face_executor.submit(
+                        detect_face_yunet,
+                        yunet,
+                        frame.copy(),
+                    )
+                )
+
+            # ---------------------------------------------
+            # Receive YuNet result
+            # ---------------------------------------------
+
+            if (
+                face_future is not None
+                and face_future.done()
+            ):
+                try:
+                    last_face = (
+                        face_future.result()
+                    )
+
+                    if last_face is not None:
+                        last_aligned_face = (
+                            align_face(
+                                frame,
+                                last_face,
+                            )
+                        )
+                    else:
+                        last_aligned_face = None
+
+                except Exception as error:
+                    log(
+                        f"YuNet error: {error}"
+                    )
+
                     last_face = None
+                    last_aligned_face = None
+
+                face_future = None
+
+            # ---------------------------------------------
+            # Draw face
+            # ---------------------------------------------
+
+            if last_face is not None:
+                x, y, w, h = [
+                    int(value)
+                    for value
+                    in last_face[:4]
+                ]
+
+                x = max(0, x)
+                y = max(0, y)
+
+                w = max(
+                    1,
+                    min(
+                        w,
+                        frame.shape[1] - x,
+                    ),
+                )
+
+                h = max(
+                    1,
+                    min(
+                        h,
+                        frame.shape[0] - y,
+                    ),
+                )
+
+                cv2.rectangle(
+                    frame,
+                    (x, y),
+                    (x + w, y + h),
+                    (255, 255, 255),
+                    2,
+                )
+
+            # ---------------------------------------------
+            # Eye closure / fatigue
+            # ---------------------------------------------
 
             fatigue_active = False
 
-            if last_face is not None:
-                x, y, w, h = [int(v) for v in last_face[:4]]
-                x = max(0, x)
-                y = max(0, y)
-                w = max(1, min(w, frame.shape[1] - x))
-                h = max(1, min(h, frame.shape[0] - y))
+            if (
+                last_aligned_face is not None
+                and frame_number
+                % EYE_CHECK_EVERY
+                == 0
+            ):
+                eye_result = eyes_are_open(
+                    last_aligned_face,
+                    eye_detector,
+                )
 
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255, 255), 2)
-
-                # Draw YuNet landmarks for this test version.
-                pts = yunet_landmarks(last_face)
-                for px, py in pts:
-                    cv2.circle(frame, (int(px), int(py)), 3, (255, 255, 255), -1)
-
-                ratio = eye_openness_ratio(last_face)
-
-                # Build a slow baseline from normal/open-looking frames.
-                if eye_baseline is None:
-                    eye_baseline = ratio
-                elif closed_since is None:
-                    eye_baseline = 0.98 * eye_baseline + 0.02 * ratio
-
-                # A substantial reduction relative to personal baseline.
-                threshold = eye_baseline * 0.82
-                eyes_closed = ratio < threshold
-
-                if eyes_closed:
-                    if closed_since is None:
-                        closed_since = now
-                    closed_for = now - closed_since
-                    eye_text = f"CLOSED {closed_for:.1f}s"
-                    fatigue_active = closed_for >= FATIGUE_SECONDS
-                else:
-                    closed_since = None
+                if eye_result is True:
                     eye_text = "OPEN"
 
-                if future is None and frame_no % EMOTION_EVERY == 0:
-                    aligned = align_face(frame, last_face)
-                    if aligned is not None:
-                        future = executor.submit(infer_emotion, fer_net, aligned.copy())
+                    last_eye_open_time = now
+                    eyes_closed_since = None
 
-            else:
-                closed_since = None
-                eye_text = "NO FACE"
-                shown_emotion = "FACE NOT DETECTED"
-                shown_state = "WAITING"
-                candidate = ""
-                candidate_count = 0
+                elif eye_result is False:
+                    if eyes_closed_since is None:
+                        eyes_closed_since = now
 
-            if future is not None and future.done():
+                    closed_duration = (
+                        now
+                        - eyes_closed_since
+                    )
+
+                    eye_text = (
+                        f"CLOSED {closed_duration:.1f}s"
+                    )
+
+                else:
+                    eye_text = "UNKNOWN"
+
+            if eyes_closed_since is not None:
+                closed_duration = (
+                    now - eyes_closed_since
+                )
+
+                fatigue_active = (
+                    closed_duration
+                    >= FATIGUE_SECONDS
+                )
+
+            # ---------------------------------------------
+            # Start FER in background
+            # ---------------------------------------------
+
+            if (
+                last_aligned_face is not None
+                and emotion_future is None
+                and frame_number
+                % EMOTION_EVERY
+                == 0
+            ):
+                emotion_future = (
+                    emotion_executor.submit(
+                        infer_emotion,
+                        fer_net,
+                        last_aligned_face.copy(),
+                    )
+                )
+
+            # ---------------------------------------------
+            # Receive FER result
+            # ---------------------------------------------
+
+            if (
+                emotion_future is not None
+                and emotion_future.done()
+            ):
                 try:
-                    emotion, conf = future.result()
+                    emotion, _ = (
+                        emotion_future.result()
+                    )
+
                     shown_emotion = emotion
-                    shown_conf = conf
 
-                    state = expression_to_state(emotion)
+                    raw_state = (
+                        emotion_to_state(
+                            emotion
+                        )
+                    )
 
-                    if fatigue_active:
-                        state = "FATIGUED"
-
-                    if state == candidate:
+                    if (
+                        raw_state
+                        == candidate_state
+                    ):
                         candidate_count += 1
+
                     else:
-                        candidate = state
+                        candidate_state = (
+                            raw_state
+                        )
+
                         candidate_count = 1
 
-                    shown_state = state
+                    if (
+                        candidate_count
+                        >= STATE_CONFIRM_COUNT
+                    ):
+                        current_state = (
+                            raw_state
+                        )
 
-                    # FATIGUED can react immediately after the sustained eye timer.
-                    required = 1 if state == "FATIGUED" else STATE_STABLE_COUNT
+                except Exception as error:
+                    log(
+                        f"Emotion inference error: {error}"
+                    )
 
-                    if (candidate_count >= required
-                            and state != last_sent
-                            and now - last_send_t >= COMMAND_INTERVAL):
-                        if send_state(nucleo, state):
-                            last_sent = state
-                            last_send_t = now
-                        shown_command = state
+                emotion_future = None
 
-                except Exception as e:
-                    log(f"Inference error: {e}")
-                future = None
+            # ---------------------------------------------
+            # State priority
+            # ---------------------------------------------
 
-            # Important: fatigue override must also work between emotion inferences.
-            if fatigue_active:
-                shown_state = "FATIGUED"
-                if last_sent != "FATIGUED" and now - last_send_t >= COMMAND_INTERVAL:
-                    if send_state(nucleo, "FATIGUED"):
-                        last_sent = "FATIGUED"
-                        last_send_t = now
-                    shown_command = "FATIGUED"
+            if last_face is None:
+                shown_emotion = (
+                    "FACE NOT DETECTED"
+                )
 
-            display = resize_to_fill(frame, SCREEN_WIDTH, SCREEN_HEIGHT)
+                shown_state = "WAITING"
+
+                candidate_state = ""
+                candidate_count = 0
+
+                eyes_closed_since = None
+                eye_text = "NO FACE"
+
+            else:
+                if fatigue_active:
+                    shown_state = (
+                        "FATIGUED"
+                    )
+
+                elif current_state:
+                    shown_state = (
+                        current_state
+                    )
+
+                else:
+                    shown_state = (
+                        "WAITING"
+                    )
+
+            # ---------------------------------------------
+            # Nucleo output
+            # ---------------------------------------------
+
+            desired_state = None
+
+            if (
+                last_face is not None
+                and shown_state
+                in (
+                    "NORMAL",
+                    "TENSE",
+                    "STRESSED",
+                    "FATIGUED",
+                )
+            ):
+                desired_state = shown_state
+
+            if desired_state is not None:
+                state_changed = (
+                    desired_state
+                    != last_sent_state
+                )
+
+                refresh_due = (
+                    now
+                    - last_send_time
+                    >= COMMAND_REFRESH_INTERVAL
+                )
+
+                interval_ok = (
+                    now
+                    - last_send_time
+                    >= COMMAND_INTERVAL
+                )
+
+                if (
+                    interval_ok
+                    and (
+                        state_changed
+                        or refresh_due
+                    )
+                ):
+                    if send_state(
+                        nucleo,
+                        desired_state,
+                    ):
+                        last_sent_state = (
+                            desired_state
+                        )
+
+                        last_send_time = now
+
+            # ---------------------------------------------
+            # Display
+            # ---------------------------------------------
+
+            display = resize_to_fill(
+                frame,
+                SCREEN_WIDTH,
+                SCREEN_HEIGHT,
+            )
+
             draw_panel(
                 display,
                 nucleo is not None,
                 shown_emotion,
                 shown_state,
-                shown_command,
-                shown_conf,
-                fps,
                 eye_text,
+                fps,
             )
 
-            cv2.imshow(WINDOW_NAME, display)
+            cv2.imshow(
+                WINDOW_NAME,
+                display,
+            )
+
             cv2.setWindowProperty(
-                WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
+                WINDOW_NAME,
+                cv2.WND_PROP_FULLSCREEN,
+                cv2.WINDOW_FULLSCREEN,
             )
 
-            key = cv2.waitKey(1) & 0xFF
-            if key in (27, ord("q")):
+            key = (
+                cv2.waitKey(1)
+                & 0xFF
+            )
+
+            if key in (
+                27,
+                ord("q"),
+            ):
                 break
 
     finally:
-        if future is not None and not future.done():
-            future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
+        if (
+            face_future is not None
+            and not face_future.done()
+        ):
+            face_future.cancel()
+
+        if (
+            emotion_future is not None
+            and not emotion_future.done()
+        ):
+            emotion_future.cancel()
+
+        face_executor.shutdown(
+            wait=False,
+            cancel_futures=True,
+        )
+
+        emotion_executor.shutdown(
+            wait=False,
+            cancel_futures=True,
+        )
 
         try:
             if nucleo is not None:
@@ -496,16 +1117,22 @@ def main():
         except Exception:
             pass
 
-        cap.release()
+        camera.release()
         cv2.destroyAllWindows()
-        log("YuNet test stopped.")
+
+        log(
+            "RPi-MASS optimized YuNet version stopped."
+        )
 
 
 if __name__ == "__main__":
     try:
         main()
+
     except Exception:
-        err = traceback.format_exc()
-        log(err)
-        print(err)
+        error = traceback.format_exc()
+
+        log(error)
+        print(error)
+
         sys.exit(1)
